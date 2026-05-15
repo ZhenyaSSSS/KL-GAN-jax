@@ -1,11 +1,27 @@
 import jax
 import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import GlobalAttention
+from models.layers import GlobalAttention, SqueezeExcitation
 
-def upsample_bilinear(x, scale=2):
-    B, H, W, C = x.shape
-    return jax.image.resize(x, (B, H * scale, W * scale, C), method='bilinear')
+class UpSamplePixelShuffle(nn.Module):
+    """Обучаемый Upsample (Subpixel Convolution). Дает максимальную резкость."""
+    features: int
+    scale: int = 2
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x):
+        B, H, W, C = x.shape
+        
+        # Умножаем количество каналов на scale^2 (для scale=2 это в 4 раза больше)
+        x = nn.Conv(self.features * (self.scale ** 2), (3, 3), padding="SAME", dtype=self.dtype)(x)
+        
+        # Хитрый reshape (Depth-to-Space): переводим каналы в пиксели H и W
+        x = x.reshape((B, H, W, self.scale, self.scale, self.features))
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5)) # Перемешиваем оси
+        x = x.reshape((B, H * self.scale, W * self.scale, self.features))
+        
+        return x
 
 class MappingNetwork(nn.Module):
     """Z -> W Style mapping network."""
@@ -22,7 +38,7 @@ class MappingNetwork(nn.Module):
         return w
 
 class ResBlockGen(nn.Module):
-    """Style-based ResNet Block with Upsampling."""
+    """Style-based ResNet Block с PixelShuffle Upsampling и Squeeze-Excitation."""
     features: int
     dtype: jnp.dtype = jnp.float32
 
@@ -30,17 +46,17 @@ class ResBlockGen(nn.Module):
     def __call__(self, x, w):
         shortcut = x
         
-        # Block 1
+        # --- Block 1 ---
         style1 = nn.Dense(x.shape[-1] * 2, dtype=self.dtype)(w)
         scale1, shift1 = jnp.split(style1, 2, axis=-1)
         x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype) # LayerNorm
         x = x * (1.0 + jnp.expand_dims(scale1, (1, 2))) + jnp.expand_dims(shift1, (1, 2))
         x = nn.swish(x)
         
-        x = upsample_bilinear(x)
-        x = nn.Conv(self.features, (3, 3), padding="SAME", dtype=self.dtype)(x)
+        # ХИТРЫЙ ОБУЧАЕМЫЙ АПСЕМПЛИНГ (вместо bilinear)
+        x = UpSamplePixelShuffle(features=self.features, dtype=self.dtype)(x)
         
-        # Block 2
+        # --- Block 2 ---
         style2 = nn.Dense(self.features * 2, dtype=self.dtype)(w)
         scale2, shift2 = jnp.split(style2, 2, axis=-1)
         x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype)
@@ -49,10 +65,12 @@ class ResBlockGen(nn.Module):
         
         x = nn.Conv(self.features, (3, 3), padding="SAME", dtype=self.dtype)(x)
         
-        # Shortcut upsample
-        shortcut = upsample_bilinear(shortcut)
-        if shortcut.shape[-1] != self.features:
-            shortcut = nn.Conv(self.features, (1, 1), padding="SAME", dtype=self.dtype)(shortcut)
+        # ДОБАВЛЯЕМ SE (Внимание к каналам)
+        x = SqueezeExcitation(features=self.features, dtype=self.dtype)(x)
+        
+        # --- Shortcut upsample ---
+        # Для шортката тоже используем PixelShuffle (но без нелинейностей)
+        shortcut = UpSamplePixelShuffle(features=self.features, dtype=self.dtype)(shortcut)
             
         return x + shortcut
 

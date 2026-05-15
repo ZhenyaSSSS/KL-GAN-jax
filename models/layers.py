@@ -39,6 +39,28 @@ class GlobalAttention(nn.Module):
         out = nn.Dense(C, dtype=self.dtype)(out)
         return x + out
 
+class SqueezeExcitation(nn.Module):
+    """Механизм внимания к каналам (Channel Attention)"""
+    features: int
+    reduction: int = 4
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x):
+        # 1. Global Average Pooling (сжимаем H и W в 1 пиксель)
+        se = jnp.mean(x, axis=(1, 2), keepdims=True)
+        
+        # 2. Squeeze (уменьшаем размерность)
+        se = nn.Dense(self.features // self.reduction, dtype=self.dtype)(se)
+        se = nn.swish(se)
+        
+        # 3. Excitation (возвращаем размерность и переводим в диапазон 0..1)
+        se = nn.Dense(self.features, dtype=self.dtype)(se)
+        se = nn.sigmoid(se)
+        
+        # 4. Умножаем исходные каналы на их "важность"
+        return x * se
+
 class MinibatchDiscrimination(nn.Module):
     num_kernels: int = 100
     kernel_dim: int = 5
