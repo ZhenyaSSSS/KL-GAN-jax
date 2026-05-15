@@ -14,6 +14,9 @@ def get_celeba_array(data_dir: str = "./data/celeba", image_size: int = 32):
     if os.path.exists(kaggle_path):
         print(f"Found Kaggle dataset at {kaggle_path}")
         image_paths = sorted(glob.glob(os.path.join(kaggle_path, "*.jpg")))
+    elif os.path.exists("./data/celeba/img_align_celeba"):
+        print("Found local dataset via torchvision structure")
+        image_paths = sorted(glob.glob("./data/celeba/img_align_celeba/*.jpg"))
     else:
         print(f"Downloading/Loading CelebA via torchvision to {data_dir}")
         os.makedirs(data_dir, exist_ok=True)
