@@ -1,0 +1,35 @@
+# Default configurations for KL-GAN TPU
+
+seed: 42
+
+# Training params
+batch_size_per_device: 512
+epochs: 500
+lr_gen: 0.0002
+lr_disc: 0.0002
+beta1: 0.5
+beta2: 0.999
+latent_dim: 128
+lambda_div: 0.5
+
+# Model params
+image_size: 32
+channels: 3
+use_sn: false # Spectral normalization
+num_kernels_mbd: 100
+kernel_dim_mbd: 5
+
+# Dtype: float32 | bfloat16 (weights/activations for conv/linear; BN uses float32)
+network_dtype: bfloat16
+
+# JAX matmul/dot precision only (not "entire program float32"). Common: default | high | float32
+jax_matmul_precision: default
+
+# W&B
+wandb_project: "KL-GAN-TPU"
+wandb_run_name: "default_run"
+
+# Evaluation
+eval_every_epochs: 5
+fid_every_epochs: 50
+num_fid_samples: 10000
