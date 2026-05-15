@@ -49,12 +49,26 @@ def symmetric_kl_loss_with_fixed_real(mu_r, var_r, log_var_r, f_fake):
     return 0.5 * (jnp.log(1.0 + kl_r_f) + jnp.log(1.0 + kl_f_r))
 
 
-def contrastive_diversity_loss(mu, all_mu, temperature=0.1):
-    """InfoNCE-style loss to diversify critic representations across devices."""
+def contrastive_diversity_loss(mu, log_var, all_mu, all_log_var):
+    """Normalized Cosine Diversity Loss for both Means and Variances.
+    Штрафует за косинусную близость как средних значений (сдвиг), так и лог-дисперсий (разброс/активность фичей).
+    Вектора нормализуются независимо, поэтому дискриминатор не может "считерить"
+    простым увеличением масштаба значений (взрывом градиентов).
+    """
+    # 1. Cosine similarity for means
     mu_norm = mu / jnp.clip(jnp.linalg.norm(mu, keepdims=True), a_min=1e-6)
     all_mu_norm = all_mu / jnp.clip(jnp.linalg.norm(all_mu, axis=-1, keepdims=True), a_min=1e-6)
-
-    sim = jnp.dot(all_mu_norm, mu_norm) / temperature
-
-    self_sim = 1.0 / temperature
-    return jnp.log(jnp.clip(jnp.sum(jnp.exp(sim)) - jnp.exp(self_sim), a_min=1e-6))
+    sim_mu_sq = jnp.square(jnp.dot(all_mu_norm, mu_norm))
+    
+    # 2. Cosine similarity for log variances
+    lv_norm = log_var / jnp.clip(jnp.linalg.norm(log_var, keepdims=True), a_min=1e-6)
+    all_lv_norm = all_log_var / jnp.clip(jnp.linalg.norm(all_log_var, axis=-1, keepdims=True), a_min=1e-6)
+    sim_lv_sq = jnp.square(jnp.dot(all_lv_norm, lv_norm))
+    
+    # Усредняем квадраты сходств. Самоподобие с самим собой = 0.5 * (1.0 + 1.0) = 1.0
+    sim_sq = 0.5 * (sim_mu_sq + sim_lv_sq)
+    
+    num_other_devices = all_mu.shape[0] - 1.0
+    loss = jnp.maximum(0.0, jnp.sum(sim_sq) - 1.0) / jnp.maximum(1.0, num_other_devices)
+    
+    return loss

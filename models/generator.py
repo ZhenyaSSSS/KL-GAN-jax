@@ -1,92 +1,66 @@
-import jax
-import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import GlobalAttention
-
-class UpSamplePixelShuffle(nn.Module):
-    """Depth-to-space upsampling (subpixel / pixel shuffle)."""
-    features: int
-    scale: int = 2
-    dtype: jnp.dtype = jnp.bfloat16
-
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, _ = x.shape
-        x = nn.Conv(self.features * (self.scale ** 2), (3, 3), padding="SAME", dtype=self.dtype)(x)
-        x = x.reshape((B, H, W, self.scale, self.scale, self.features))
-        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
-        x = x.reshape((B, H * self.scale, W * self.scale, self.features))
-        
-        return x
+import flax.linen as nn
+from models.layers import HybridDiTBlock, UpSamplePixelShuffle
 
 class MappingNetwork(nn.Module):
-    """Z -> W Style mapping network."""
     features: int = 256
     num_layers: int = 4
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, z):
+        # Обучаемые статистики для стиля
+        mu = self.param('style_mu', nn.initializers.zeros_init(), z.shape[-1:], jnp.float32)
+        log_sigma = self.param('style_log_sigma', nn.initializers.zeros_init(), z.shape[-1:], jnp.float32)
+        z = z * jnp.exp(log_sigma) + mu
+
         w = z
         for _ in range(self.num_layers):
             w = nn.Dense(self.features, dtype=self.dtype)(w)
             w = nn.swish(w)
         return w
 
-class ResBlockGen(nn.Module):
-    """Style-modulated residual block with pixel-shuffle upsample."""
-    features: int
-    dtype: jnp.dtype = jnp.float32
-
-    @nn.compact
-    def __call__(self, x, w):
-        shortcut = x
-        style1 = nn.Dense(x.shape[-1] * 2, dtype=self.dtype)(w)
-        scale1, shift1 = jnp.split(style1, 2, axis=-1)
-        x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype)
-        x = x * (1.0 + jnp.expand_dims(scale1, (1, 2))) + jnp.expand_dims(shift1, (1, 2))
-        x = nn.swish(x)
-        x = UpSamplePixelShuffle(features=self.features, dtype=self.dtype)(x)
-        style2 = nn.Dense(self.features * 2, dtype=self.dtype)(w)
-        scale2, shift2 = jnp.split(style2, 2, axis=-1)
-        x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype)
-        x = x * (1.0 + jnp.expand_dims(scale2, (1, 2))) + jnp.expand_dims(shift2, (1, 2))
-        x = nn.swish(x)
-        
-        x = nn.Conv(self.features, (3, 3), padding="SAME", dtype=self.dtype)(x)
-
-        B, H, W, C = shortcut.shape
-        shortcut = jax.image.resize(
-            shortcut, shape=(B, H * 2, W * 2, C), method="nearest"
-        )
-        if C != self.features:
-            shortcut = nn.Conv(
-                self.features,
-                (1, 1),
-                padding="SAME",
-                use_bias=False,
-                dtype=self.dtype,
-            )(shortcut)
-
-        return x + shortcut
-
 class Generator(nn.Module):
-    """Style-based generator: mapping network, residual blocks, optional attention."""
     channels: int = 3
+    features: int = 128
+    depth: int = 6
+    patch_size: int = 2
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, z):
-        w = MappingNetwork(features=256, dtype=jnp.float32)(z).astype(self.dtype)
-        x = nn.Dense(256 * 4 * 4, dtype=self.dtype)(w)
-        x = x.reshape((x.shape[0], 4, 4, 256))
-        x = ResBlockGen(features=128, dtype=self.dtype)(x, w)
-        x = GlobalAttention(features=128, dtype=self.dtype)(x)
-        x = ResBlockGen(features=64, dtype=self.dtype)(x, w)
-        x = GlobalAttention(features=64, dtype=self.dtype)(x)
-        x = ResBlockGen(features=32, dtype=self.dtype)(x, w)
-        x = nn.swish(x)
-        x = nn.Conv(self.channels, (3, 3), padding="SAME", dtype=self.dtype)(x)
-        x = nn.tanh(x)
+    def __call__(self, z, spatial_noise=None):
+        # 1. Подготавливаем стиль
+        w = MappingNetwork(features=self.features, dtype=jnp.float32)(z).astype(self.dtype)
         
-        return x
+        # 2. Подготавливаем пространственный шум (если не передан, генерим)
+        B = z.shape[0]
+        if spatial_noise is None:
+            raise ValueError("В концепции трубы Generator требует spatial_noise на вход!")
+            
+        # Обучаемые статистики для пространственного шума
+        mu_s = self.param('spatial_mu', nn.initializers.zeros_init(), (1, 1, 1, spatial_noise.shape[-1]), jnp.float32)
+        log_sigma_s = self.param('spatial_log_sigma', nn.initializers.zeros_init(), (1, 1, 1, spatial_noise.shape[-1]), jnp.float32)
+        
+        x = spatial_noise * jnp.exp(log_sigma_s) + mu_s
+        x = x.astype(self.dtype)
+
+        # 3. Patchify
+        x = nn.Conv(
+            self.features, 
+            kernel_size=(self.patch_size, self.patch_size), 
+            strides=(self.patch_size, self.patch_size),
+            padding="VALID",
+            dtype=self.dtype
+        )(x)
+
+        # 4. Изотропная труба
+        for _ in range(self.depth):
+            x = HybridDiTBlock(features=self.features, dtype=self.dtype)(x, w)
+
+        # 5. Unpatchify
+        x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
+        x = UpSamplePixelShuffle(features=self.channels, scale=self.patch_size, dtype=self.dtype)(x)
+        
+        # Финальная проекция
+        x = nn.Conv(self.channels, (3, 3), padding="SAME", dtype=self.dtype)(x)
+        return nn.tanh(x)

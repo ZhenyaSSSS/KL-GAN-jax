@@ -26,7 +26,7 @@ class Config:
     beta1: float = 0.5
     beta2: float = 0.999
     latent_dim: int = 128
-    lambda_div: float = 0.5
+    lambda_div: float = 2.0
     
     image_size: int = 32
     channels: int = 3

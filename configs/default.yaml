@@ -10,7 +10,7 @@ lr_disc: 0.0002
 beta1: 0.5
 beta2: 0.999
 latent_dim: 128
-lambda_div: 0.5
+lambda_div: 2.0
 
 # Model params
 image_size: 32

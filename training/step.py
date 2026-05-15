@@ -11,18 +11,22 @@ from config import config
 
 @partial(jax.pmap, axis_name='tpu_nodes')
 def train_step(rng, g_state, d_state, ema_g_params, real_images):
-    z = jax.random.normal(rng, (real_images.shape[0], config.latent_dim))
+    rng_z, rng_spatial = jax.random.split(rng)
+    
+    z = jax.random.normal(rng_z, (real_images.shape[0], config.latent_dim))
+    spatial_noise = jax.random.normal(rng_spatial, real_images.shape)
 
     def d_loss_fn(d_params):
         f_real = d_state.apply_fn({"params": d_params}, real_images)
-        fake_images = g_state.apply_fn({"params": g_state.params}, z)
+        fake_images = g_state.apply_fn({"params": g_state.params}, z, spatial_noise)
         f_fake = d_state.apply_fn({"params": d_params}, fake_images)
 
         mu_r, var_r, log_var_r = calc_stats_stable(f_real)
         skl = symmetric_kl_loss(f_real, f_fake)
 
         all_mu_real = jax.lax.all_gather(mu_r, axis_name='tpu_nodes')
-        div_loss = contrastive_diversity_loss(mu_r, all_mu_real)
+        all_log_var_real = jax.lax.all_gather(log_var_r, axis_name='tpu_nodes')
+        div_loss = contrastive_diversity_loss(mu_r, log_var_r, all_mu_real, all_log_var_real)
 
         loss_D = -skl + (config.lambda_div * div_loss)
         return loss_D, (skl, div_loss, mu_r, var_r, log_var_r)
@@ -30,7 +34,7 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
     grads_d, (skl, div_loss, mu_r, var_r, log_var_r) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
 
     def g_loss_fn(g_params):
-        fake_images = g_state.apply_fn({"params": g_params}, z)
+        fake_images = g_state.apply_fn({"params": g_params}, z, spatial_noise)
         f_fake = d_state.apply_fn({"params": d_state.params}, fake_images)
 
         loss_G = symmetric_kl_loss_with_fixed_real(mu_r, var_r, log_var_r, f_fake)

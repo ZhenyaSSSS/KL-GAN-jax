@@ -15,10 +15,8 @@ class GeGLU(nn.Module):
         x, gate = jnp.split(x, 2, axis=-1)
         return x * nn.gelu(gate)
 
-
 class GRN(nn.Module):
     """Global Response Normalization (ConvNeXt V2): channel competition via spatial L2 energy."""
-
     dim: int
     dtype: jnp.dtype = jnp.bfloat16
 
@@ -32,10 +30,8 @@ class GRN(nn.Module):
         beta = self.param("beta", nn.initializers.zeros_init(), (1, 1, 1, self.dim), self.dtype)
         return x * (1.0 + gamma * nx) + beta
 
-
 class GlobalAttention(nn.Module):
     """Multi-head self-attention with QK GroupNorm and zero-init residual scale (gamma)."""
-
     features: int
     num_heads: int = 4
     dtype: jnp.dtype = jnp.float32
@@ -87,7 +83,6 @@ class GlobalAttention(nn.Module):
         gamma = self.param("gamma", nn.initializers.constant(0.0), (1,), self.dtype)
         return x + out * gamma
 
-
 class MinibatchDiscrimination(nn.Module):
     num_kernels: int = 100
     kernel_dim: int = 5
@@ -106,3 +101,86 @@ class MinibatchDiscrimination(nn.Module):
         o_x = jnp.sum(c_b, axis=1) - 1.0
 
         return jnp.concatenate([x, o_x.astype(x.dtype)], axis=-1)
+
+class UpSamplePixelShuffle(nn.Module):
+    """Depth-to-space upsampling (subpixel / pixel shuffle)."""
+    features: int
+    scale: int = 2
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x):
+        B, H, W, _ = x.shape
+        x = nn.Conv(self.features * (self.scale ** 2), (3, 3), padding="SAME", dtype=self.dtype)(x)
+        x = x.reshape((B, H, W, self.scale, self.scale, self.features))
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
+        x = x.reshape((B, H * self.scale, W * self.scale, self.features))
+        return x
+
+class AdaLNZero(nn.Module):
+    """SOTA DiT Style Modulation (AdaLN-Zero)"""
+    features: int
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x, w):
+        x = nn.LayerNorm(use_scale=False, use_bias=False, dtype=jnp.float32)(x).astype(self.dtype)
+        
+        style_params = nn.Dense(
+            self.features * 6, 
+            kernel_init=nn.initializers.zeros_init(), 
+            bias_init=nn.initializers.zeros_init(),
+            dtype=self.dtype
+        )(w)
+        
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(style_params, 6, axis=-1)
+        
+        shift_msa = jnp.expand_dims(shift_msa, (1, 2))
+        scale_msa = jnp.expand_dims(scale_msa, (1, 2))
+        gate_msa = jnp.expand_dims(gate_msa, (1, 2))
+        shift_mlp = jnp.expand_dims(shift_mlp, (1, 2))
+        scale_mlp = jnp.expand_dims(scale_mlp, (1, 2))
+        gate_mlp = jnp.expand_dims(gate_mlp, (1, 2))
+        
+        return x, shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp
+
+class HybridDiTBlock(nn.Module):
+    """DiT + ConvNeXt V2 Hybrid Block"""
+    features: int
+    num_heads: int = 4
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x, w):
+        norm_x, shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = AdaLNZero(
+            features=self.features, dtype=self.dtype
+        )(x, w)
+        
+        x_modulated = norm_x * (1.0 + scale_msa) + shift_msa
+        
+        x_local = nn.Conv(
+            self.features, (3, 3), padding="SAME", feature_group_count=self.features, dtype=self.dtype
+        )(x_modulated)
+        
+        B, H, W, C = x_local.shape
+        x_flat = x_local.reshape((B, H * W, C))
+        attn_out = nn.SelfAttention(
+            num_heads=self.num_heads, 
+            qkv_features=self.features,
+            out_features=self.features,
+            dtype=self.dtype
+        )(x_flat)
+        attn_out = attn_out.reshape((B, H, W, C))
+        
+        x = x + gate_msa * attn_out
+        
+        norm_x2 = nn.LayerNorm(use_scale=False, use_bias=False, dtype=jnp.float32)(x).astype(self.dtype)
+        x_modulated2 = norm_x2 * (1.0 + scale_mlp) + shift_mlp
+        
+        ffn_out = nn.Dense(self.features * 4, dtype=self.dtype)(x_modulated2)
+        ffn_out = GeGLU()(ffn_out)
+        ffn_out = nn.Dense(self.features, dtype=self.dtype)(ffn_out)
+        
+        x = x + gate_mlp * ffn_out
+        
+        return x
