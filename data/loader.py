@@ -10,21 +10,40 @@ from torchvision.datasets import CelebA
 
 def get_celeba_array(data_dir: str = "./data/celeba", image_size: int = 32):
     """Loads CelebA into a single float32 array [N, H, W, C] in [-1, 1]."""
-    kaggle_path = "/kaggle/input/celeba-dataset/img_align_celeba/img_align_celeba"
-    if os.path.exists(kaggle_path):
-        print(f"Found Kaggle dataset at {kaggle_path}")
-        image_paths = sorted(glob.glob(os.path.join(kaggle_path, "*.jpg")))
-    elif os.path.exists("./data/celeba/img_align_celeba"):
+    
+    # Пытаемся найти датасет в самых популярных путях Kaggle
+    kaggle_paths = [
+        "/kaggle/input/celeba-dataset/img_align_celeba/img_align_celeba",
+        "/kaggle/input/celeba-dataset/img_align_celeba",
+        "/kaggle/input/celeba/img_align_celeba/img_align_celeba"
+    ]
+    
+    image_paths = []
+    for path in kaggle_paths:
+        if os.path.exists(path) and len(os.listdir(path)) > 1000:
+            print(f"Found Kaggle dataset at {path}")
+            image_paths = sorted(glob.glob(os.path.join(path, "*.jpg")))
+            break
+            
+    if not image_paths and os.path.exists("./data/celeba/img_align_celeba"):
         print("Found local dataset via torchvision structure")
         image_paths = sorted(glob.glob("./data/celeba/img_align_celeba/*.jpg"))
-    else:
+        
+    if not image_paths:
         print(f"Downloading/Loading CelebA via torchvision to {data_dir}")
+        print("WARNING: Google Drive download might fail due to quota limits.")
+        print("RECOMMENDED: Add the 'celeba-dataset' to your Kaggle Notebook via 'Add Data' on the right panel!")
         os.makedirs(data_dir, exist_ok=True)
-        dataset = CelebA(root=data_dir, split="all", download=True)
-        image_paths = [
-            os.path.join(data_dir, "celeba", "img_align_celeba", f"{i:06d}.jpg")
-            for i in range(1, len(dataset) + 1)
-        ]
+        try:
+            dataset = CelebA(root=data_dir, split="all", download=True)
+            image_paths = [
+                os.path.join(data_dir, "celeba", "img_align_celeba", f"{i:06d}.jpg")
+                for i in range(1, len(dataset) + 1)
+            ]
+        except Exception as e:
+            print("Failed to download CelebA via torchvision:", e)
+            print("To fix this, click 'Add Data' in Kaggle and search for 'celeba-dataset'.")
+            raise RuntimeError("Dataset not found and Google Drive quota exceeded.")
 
     print(f"Processing {len(image_paths)} images...")
 
