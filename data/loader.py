@@ -62,22 +62,31 @@ def get_celeba_array(data_dir: str = "./data/celeba", image_size: int = 32):
     print(f"Processing {len(image_paths)} images...")
 
     def process_image(path):
-        with Image.open(path) as img:
-            w, h = img.size
-            new_w, new_h = 140, 140
-            left = (w - new_w) / 2
-            top = (h - new_h) / 2
-            right = (w + new_w) / 2
-            bottom = (h + new_h) / 2
-            img = img.crop((left, top, right, bottom))
-            img = img.resize((image_size, image_size), Image.Resampling.BILINEAR)
-            arr = np.array(img, dtype=np.float32)
-            return (arr / 127.5) - 1.0
+        try:
+            with Image.open(path) as img:
+                w, h = img.size
+                new_w, new_h = 140, 140
+                left = (w - new_w) / 2
+                top = (h - new_h) / 2
+                right = (w + new_w) / 2
+                bottom = (h + new_h) / 2
+                img = img.crop((left, top, right, bottom))
+                img = img.resize((image_size, image_size), Image.Resampling.BILINEAR)
+                arr = np.array(img, dtype=np.float32)
+                return (arr / 127.5) - 1.0
+        except Exception:
+            return None
 
-    images = []
-    for path in tqdm(image_paths, desc="Loading images"):
-        if os.path.exists(path):
-            images.append(process_image(path))
+    import multiprocessing
+    from concurrent.futures import ThreadPoolExecutor
+
+    num_workers = min(64, multiprocessing.cpu_count() * 2)
+    print(f"Using {num_workers} threads for ultra-fast image loading...")
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        results = list(tqdm(executor.map(process_image, image_paths), total=len(image_paths), desc="Loading images"))
+
+    images = [r for r in results if r is not None]
 
     data_array = np.stack(images, axis=0)
     print(f"Dataset shape: {data_array.shape}, Memory: {data_array.nbytes / (1024**3):.2f} GB")
