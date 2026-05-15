@@ -15,7 +15,6 @@ from data.loader import load_dataset_replicated
 from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
-from metrics.eval_mobilenet import SimpleFeatureExtractor, calculate_mobilenet_kl
 from metrics.fid_score import compute_fid
 
 
@@ -120,11 +119,11 @@ def main():
     rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (64, config.latent_dim), dtype=jnp.float32)
 
-    rng, fe_rng = jax.random.split(rng)
-    fe_model = SimpleFeatureExtractor()
-    fe_params = fe_model.init(fe_rng, dummy_img)["params"]
-
     on_host = np.asarray(jax.device_get(dataset_replicated))
+
+    @jax.jit
+    def gen_batch(params, z):
+        return g_model.apply({"params": params}, z)
 
     print("Starting compilation...")
     compile_start = time.time()
@@ -169,27 +168,9 @@ def main():
 
         # Evaluate using EMA params!
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
-        fake_test_images = g_model.apply({"params": ema_g_params_cpu}, test_z)
+        fake_test_images = gen_batch(ema_g_params_cpu, test_z)
         grid = create_image_grid(np.array(fake_test_images))
         wandb.log({"Generated Images": wandb.Image(grid)}, step=epoch)
-
-        if epoch % config.eval_every_epochs == 0:
-            real_eval = on_host[:1024]
-            rng, z_rng = jax.random.split(rng)
-            z_eval = jax.random.normal(z_rng, (1024, config.latent_dim), dtype=jnp.float32)
-
-            @jax.jit
-            def gen_batch(z):
-                return g_model.apply({"params": ema_g_params_cpu}, z)
-
-            fake_eval = []
-            for i in range(0, 1024, 128):
-                fake_eval.append(gen_batch(z_eval[i : i + 128]))
-            fake_eval = jnp.concatenate(fake_eval, axis=0)
-
-            kl_score = calculate_mobilenet_kl(real_eval, fake_eval, fe_model, fe_params)
-            wandb.log({"Val/MobileNet_KL": float(kl_score)}, step=epoch)
-            print(f"Epoch {epoch} | MobileNet_KL: {float(kl_score):.4f}")
 
         if epoch % config.fid_every_epochs == 0 or epoch == config.epochs:
             fake_images_fid = []
@@ -200,7 +181,7 @@ def main():
                     (min(256, config.num_fid_samples - i), config.latent_dim),
                     dtype=jnp.float32,
                 )
-                fake_images_fid.append(np.array(gen_batch(z_batch)))
+                fake_images_fid.append(np.array(gen_batch(ema_g_params_cpu, z_batch)))
             fake_images_fid = np.concatenate(fake_images_fid, axis=0)
 
             real_images_fid = on_host[: config.num_fid_samples]
