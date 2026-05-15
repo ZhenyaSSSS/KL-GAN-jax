@@ -11,19 +11,33 @@ from torchvision.datasets import CelebA
 def get_celeba_array(data_dir: str = "./data/celeba", image_size: int = 32):
     """Loads CelebA into a single float32 array [N, H, W, C] in [-1, 1]."""
     
-    # Пытаемся найти датасет в самых популярных путях Kaggle
     kaggle_paths = [
         "/kaggle/input/celeba-dataset/img_align_celeba/img_align_celeba",
         "/kaggle/input/celeba-dataset/img_align_celeba",
-        "/kaggle/input/celeba/img_align_celeba/img_align_celeba"
+        "/kaggle/input/celeba/img_align_celeba/img_align_celeba",
+        "/kaggle/input/celeba/img_align_celeba",
+        "/kaggle/input/datasets/kushsheth/face-vae/img_align_celeba/img_align_celeba",
+        "/kaggle/input/datasets/kushsheth/face-vae/img_align_celeba",
+        "/kaggle/input/datasets/kushsheth/face-vae",
+        "/kaggle/input/face-vae/img_align_celeba/img_align_celeba",
+        "/kaggle/input/face-vae/img_align_celeba",
+        "/kaggle/input/face-vae"
     ]
+    
+    if os.path.exists("/kaggle/input"):
+        for d in os.listdir("/kaggle/input"):
+            kaggle_paths.append(f"/kaggle/input/{d}/img_align_celeba/img_align_celeba")
+            kaggle_paths.append(f"/kaggle/input/{d}/img_align_celeba")
+            kaggle_paths.append(f"/kaggle/input/{d}")
     
     image_paths = []
     for path in kaggle_paths:
-        if os.path.exists(path) and len(os.listdir(path)) > 1000:
-            print(f"Found Kaggle dataset at {path}")
-            image_paths = sorted(glob.glob(os.path.join(path, "*.jpg")))
-            break
+        if os.path.exists(path):
+            found_jpgs = glob.glob(os.path.join(path, "*.jpg"))
+            if len(found_jpgs) > 1000:
+                print(f"Found Kaggle dataset at {path}")
+                image_paths = sorted(found_jpgs)
+                break
             
     if not image_paths and os.path.exists("./data/celeba/img_align_celeba"):
         print("Found local dataset via torchvision structure")
