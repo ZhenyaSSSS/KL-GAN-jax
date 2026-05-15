@@ -5,7 +5,7 @@ from training.losses import (
     calc_stats_stable,
     symmetric_kl_loss,
     symmetric_kl_loss_with_fixed_real,
-    contrastive_diversity_loss,
+    zero_centered_repulsion_loss,
 )
 from config import config
 
@@ -26,7 +26,9 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
         all_mu_real = jax.lax.all_gather(mu_r, axis_name='tpu_nodes')
         all_log_var_real = jax.lax.all_gather(log_var_r, axis_name='tpu_nodes')
-        div_loss = contrastive_diversity_loss(mu_r, log_var_r, all_mu_real, all_log_var_real)
+        div_loss = zero_centered_repulsion_loss(
+            mu_r, all_mu_real, log_var_r, all_log_var_real, config.diversity_temperature
+        )
 
         loss_D = -skl + (config.lambda_div * div_loss)
         return loss_D, (skl, div_loss, mu_r, var_r, log_var_r)
