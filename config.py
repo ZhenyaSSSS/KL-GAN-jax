@@ -21,7 +21,7 @@ class Config:
     
     batch_size_per_device: int = 512
     epochs: int = 500
-    lr_gen: float = 0.0002
+    lr_gen: float = 0.0001
     lr_disc: float = 0.0002
     beta1: float = 0.5
     beta2: float = 0.999

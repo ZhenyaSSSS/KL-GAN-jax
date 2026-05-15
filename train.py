@@ -84,7 +84,7 @@ def main():
     steps_per_epoch = num_samples // config.batch_size_per_device
 
     dt = config.compute_dtype
-    g_model = Generator(channels=config.channels, dtype=dt)
+    g_model = Generator(channels=config.channels, image_size=config.image_size, dtype=dt)
     d_model = Discriminator(
         use_sn=config.use_sn,
         num_kernels_mbd=config.num_kernels_mbd,
@@ -92,13 +92,15 @@ def main():
         dtype=dt,
     )
 
-    tx_g = optax.adam(learning_rate=config.lr_gen, b1=config.beta1, b2=config.beta2)
+    tx_g = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate=config.lr_gen, b1=config.beta1, b2=config.beta2),
+    )
     tx_d = optax.adam(learning_rate=config.lr_disc, b1=config.beta1, b2=config.beta2)
 
     rng, init_g_rng = jax.random.split(rng)
     dummy_z = jnp.ones((1, config.latent_dim), dtype=jnp.float32)
-    dummy_spatial = jnp.ones((1, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
-    g_params = g_model.init(init_g_rng, dummy_z, dummy_spatial)["params"]
+    g_params = g_model.init(init_g_rng, dummy_z)["params"]
     g_state = train_state.TrainState.create(apply_fn=g_model.apply, params=g_params, tx=tx_g)
     g_state = flax.jax_utils.replicate(g_state)
 
@@ -119,9 +121,8 @@ def main():
 
     ema_g_params = g_state.params
 
-    rng, test_z_rng, test_spatial_rng = jax.random.split(rng, 3)
+    rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (GEN_BATCH_SIZE, config.latent_dim), dtype=jnp.float32)
-    test_spatial = jax.random.normal(test_spatial_rng, (GEN_BATCH_SIZE, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
 
     try:
         resnet_model = load_pretrained_resnet()
@@ -138,21 +139,20 @@ def main():
     on_host = np.asarray(jax.device_get(dataset_replicated[0]))
 
     @jax.jit
-    def gen_batch(params, z, spatial_noise):
-        return g_model.apply({"params": params}, z, spatial_noise)
+    def gen_batch(params, z):
+        return g_model.apply({"params": params}, z)
 
-    def gen_batch_pad(params, z, spatial_noise, n_take):
+    def gen_batch_pad(params, z, n_take):
         """Always compile-friendly GEN_BATCH_SIZE; returns host numpy of first n_take rows."""
         n = int(z.shape[0])
         if n > GEN_BATCH_SIZE:
             raise ValueError(f"z batch {n} exceeds GEN_BATCH_SIZE={GEN_BATCH_SIZE}")
         if n == GEN_BATCH_SIZE:
-            out = gen_batch(params, z, spatial_noise)
+            out = gen_batch(params, z)
             return np.asarray(out[:n_take])
         pad = GEN_BATCH_SIZE - n
         z_pad = jnp.concatenate([z, jnp.zeros((pad, z.shape[1]), dtype=z.dtype)], axis=0)
-        s_pad = jnp.concatenate([spatial_noise, jnp.zeros((pad, *spatial_noise.shape[1:]), dtype=spatial_noise.dtype)], axis=0)
-        out = gen_batch(params, z_pad, s_pad)
+        out = gen_batch(params, z_pad)
         return np.asarray(out[:n_take])
 
     print("Starting compilation...")
@@ -233,7 +233,7 @@ def main():
 
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
         gen_start = time.time()
-        fake_test_images = gen_batch(ema_g_params_cpu, test_z, test_spatial)
+        fake_test_images = gen_batch(ema_g_params_cpu, test_z)
         fake_test_images = np.asarray(fake_test_images)[:64]
         print(f"Gen preview & device sync: {time.time() - gen_start:.2f}s")
         grid = create_image_grid(fake_test_images)
@@ -241,15 +241,13 @@ def main():
 
         if epoch % config.eval_every_epochs == 0 and resnet_model is not None:
             real_eval = on_host[:2048]
-            rng, z_rng, s_rng = jax.random.split(rng, 3)
+            rng, z_rng = jax.random.split(rng)
             z_eval = jax.random.normal(z_rng, (2048, config.latent_dim), dtype=jnp.float32)
-            s_eval = jax.random.normal(s_rng, (2048, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
 
             fake_eval = []
             for i in range(0, 2048, GEN_BATCH_SIZE):
                 z_chunk = z_eval[i : i + GEN_BATCH_SIZE]
-                s_chunk = s_eval[i : i + GEN_BATCH_SIZE]
-                fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk, s_chunk))
+                fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk))
             fake_eval = jnp.concatenate(fake_eval, axis=0)
 
             kl_score = calculate_resnet_kl(real_eval, fake_eval, resnet_model, resnet_params)
@@ -260,10 +258,9 @@ def main():
             fake_images_fid = []
             for i in tqdm(range(0, config.num_fid_samples, GEN_BATCH_SIZE), desc="Generating FID samples"):
                 need = min(GEN_BATCH_SIZE, config.num_fid_samples - i)
-                rng, z_rng, s_rng = jax.random.split(rng, 3)
+                rng, z_rng = jax.random.split(rng)
                 z_small = jax.random.normal(z_rng, (need, config.latent_dim), dtype=jnp.float32)
-                s_small = jax.random.normal(s_rng, (need, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
-                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, s_small, need))
+                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need))
             fake_images_fid = np.concatenate(fake_images_fid, axis=0)
 
             os.makedirs("/kaggle/working/fid_samples", exist_ok=True)

@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import flax.linen as nn
-from models.layers import HybridDiTBlock, UpSamplePixelShuffle
+from models.layers import HybridDiTBlock
+
 
 class MappingNetwork(nn.Module):
     features: int = 256
@@ -9,58 +10,40 @@ class MappingNetwork(nn.Module):
 
     @nn.compact
     def __call__(self, z):
-        # Обучаемые статистики для стиля
-        mu = self.param('style_mu', nn.initializers.zeros_init(), z.shape[-1:], jnp.float32)
-        log_sigma = self.param('style_log_sigma', nn.initializers.zeros_init(), z.shape[-1:], jnp.float32)
-        z = z * jnp.exp(log_sigma) + mu
-
+        z = z / jnp.sqrt(jnp.mean(jnp.square(z), axis=-1, keepdims=True) + 1e-8)
         w = z
         for _ in range(self.num_layers):
             w = nn.Dense(self.features, dtype=self.dtype)(w)
             w = nn.swish(w)
         return w
 
+
 class Generator(nn.Module):
     channels: int = 3
     features: int = 128
+    mapping_dim: int = 256
     depth: int = 6
     patch_size: int = 2
+    image_size: int = 32
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, z, spatial_noise=None):
-        # 1. Подготавливаем стиль
-        w = MappingNetwork(features=self.features, dtype=jnp.float32)(z).astype(self.dtype)
-        
-        # 2. Подготавливаем пространственный шум (если не передан, генерим)
+    def __call__(self, z):
+        w = MappingNetwork(features=self.mapping_dim, num_layers=4, dtype=jnp.float32)(z).astype(self.dtype)
+        grid_size = self.image_size // self.patch_size
+        x = self.param(
+            "constant_input",
+            nn.initializers.normal(stddev=0.02),
+            (1, grid_size, grid_size, self.features),
+        )
         B = z.shape[0]
-        if spatial_noise is None:
-            raise ValueError("В концепции трубы Generator требует spatial_noise на вход!")
-            
-        # Обучаемые статистики для пространственного шума
-        mu_s = self.param('spatial_mu', nn.initializers.zeros_init(), (1, 1, 1, spatial_noise.shape[-1]), jnp.float32)
-        log_sigma_s = self.param('spatial_log_sigma', nn.initializers.zeros_init(), (1, 1, 1, spatial_noise.shape[-1]), jnp.float32)
-        
-        x = spatial_noise * jnp.exp(log_sigma_s) + mu_s
-        x = x.astype(self.dtype)
-
-        # 3. Patchify
-        x = nn.Conv(
-            self.features, 
-            kernel_size=(self.patch_size, self.patch_size), 
-            strides=(self.patch_size, self.patch_size),
-            padding="VALID",
-            dtype=self.dtype
-        )(x)
-
-        # 4. Изотропная труба
+        x = jnp.broadcast_to(x, (B, grid_size, grid_size, self.features)).astype(self.dtype)
         for _ in range(self.depth):
             x = HybridDiTBlock(features=self.features, dtype=self.dtype)(x, w)
-
-        # 5. Unpatchify
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        x = UpSamplePixelShuffle(features=self.channels, scale=self.patch_size, dtype=self.dtype)(x)
-        
-        # Финальная проекция
-        x = nn.Conv(self.channels, (3, 3), padding="SAME", dtype=self.dtype)(x)
+        out_channels = (self.patch_size**2) * self.channels
+        x = nn.Dense(out_channels, kernel_init=nn.initializers.zeros_init(), dtype=self.dtype)(x)
+        x = x.reshape((B, grid_size, grid_size, self.patch_size, self.patch_size, self.channels))
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
+        x = x.reshape((B, self.image_size, self.image_size, self.channels))
         return nn.tanh(x)

@@ -133,54 +133,54 @@ class AdaLNZero(nn.Module):
             dtype=self.dtype
         )(w)
         
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(style_params, 6, axis=-1)
+        shift_s, scale_s, gate_s, shift_f, scale_f, gate_f = jnp.split(style_params, 6, axis=-1)
         
-        shift_msa = jnp.expand_dims(shift_msa, (1, 2))
-        scale_msa = jnp.expand_dims(scale_msa, (1, 2))
-        gate_msa = jnp.expand_dims(gate_msa, (1, 2))
-        shift_mlp = jnp.expand_dims(shift_mlp, (1, 2))
-        scale_mlp = jnp.expand_dims(scale_mlp, (1, 2))
-        gate_mlp = jnp.expand_dims(gate_mlp, (1, 2))
+        shift_s = jnp.expand_dims(shift_s, (1, 2))
+        scale_s = jnp.expand_dims(scale_s, (1, 2))
+        gate_s = jnp.expand_dims(gate_s, (1, 2))
+        shift_f = jnp.expand_dims(shift_f, (1, 2))
+        scale_f = jnp.expand_dims(scale_f, (1, 2))
+        gate_f = jnp.expand_dims(gate_f, (1, 2))
         
-        return x, shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp
+        return x, shift_s, scale_s, gate_s, shift_f, scale_f, gate_f
 
 class HybridDiTBlock(nn.Module):
-    """DiT + ConvNeXt V2 Hybrid Block"""
     features: int
     num_heads: int = 4
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x, w):
-        norm_x, shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = AdaLNZero(
+        norm_x, shift_s, scale_s, gate_s, shift_f, scale_f, gate_f = AdaLNZero(
             features=self.features, dtype=self.dtype
         )(x, w)
-        
-        x_modulated = norm_x * (1.0 + scale_msa) + shift_msa
-        
+
+        x_modulated = norm_x * (1.0 + scale_s) + shift_s
+
         x_local = nn.Conv(
-            self.features, (3, 3), padding="SAME", feature_group_count=self.features, dtype=self.dtype
+            self.features, (7, 7), padding="SAME", feature_group_count=self.features, dtype=self.dtype
         )(x_modulated)
-        
+
         B, H, W, C = x_local.shape
         x_flat = x_local.reshape((B, H * W, C))
         attn_out = nn.SelfAttention(
-            num_heads=self.num_heads, 
+            num_heads=self.num_heads,
             qkv_features=self.features,
             out_features=self.features,
-            dtype=self.dtype
+            dtype=self.dtype,
         )(x_flat)
         attn_out = attn_out.reshape((B, H, W, C))
-        
-        x = x + gate_msa * attn_out
-        
+
+        x = x + gate_s * (x_local + attn_out)
+
         norm_x2 = nn.LayerNorm(use_scale=False, use_bias=False, dtype=jnp.float32)(x).astype(self.dtype)
-        x_modulated2 = norm_x2 * (1.0 + scale_mlp) + shift_mlp
-        
-        ffn_out = nn.Dense(self.features * 4, dtype=self.dtype)(x_modulated2)
-        ffn_out = GeGLU()(ffn_out)
-        ffn_out = nn.Dense(self.features, dtype=self.dtype)(ffn_out)
-        
-        x = x + gate_mlp * ffn_out
-        
+        x_modulated2 = norm_x2 * (1.0 + scale_f) + shift_f
+
+        ffn = nn.Dense(self.features * 4, dtype=self.dtype)(x_modulated2)
+        ffn = GeGLU()(ffn)
+        ffn = GRN(dim=self.features * 2, dtype=self.dtype)(ffn)
+        ffn = nn.Dense(self.features, dtype=self.dtype)(ffn)
+
+        x = x + gate_f * ffn
+
         return x
