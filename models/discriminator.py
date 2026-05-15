@@ -1,9 +1,9 @@
 import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import MinibatchDiscrimination, BlurPool, GeGLU, GlobalAttention
+from models.layers import MinibatchDiscrimination, BlurPool, GeGLU, GlobalAttention, GRN
 
 class ConvNeXtBlock(nn.Module):
-    """Depthwise ConvNeXt-style block for Discriminator."""
+    """Depthwise ConvNeXt V2-style block: dw conv -> LN -> MLP + GeGLU -> GRN -> projection."""
     features: int
     dtype: jnp.dtype = jnp.float32
 
@@ -14,6 +14,7 @@ class ConvNeXtBlock(nn.Module):
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.Dense(self.features * 4 * 2, dtype=self.dtype)(x)
         x = GeGLU()(x)
+        x = GRN(dim=self.features * 4, dtype=self.dtype)(x)
         x = nn.Dense(self.features, dtype=self.dtype)(x)
         
         if shortcut.shape[-1] != self.features:
@@ -22,7 +23,7 @@ class ConvNeXtBlock(nn.Module):
         return x + shortcut
 
 class Discriminator(nn.Module):
-    """ConvNeXt-style discriminator with BlurPool downsampling and self-attention."""
+    """ConvNeXt-style discriminator with BlurPool and multi-scale self-attention (16², 8²)."""
     use_sn: bool = False  # unused; kept for config compatibility
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
@@ -39,6 +40,7 @@ class Discriminator(nn.Module):
         x = GlobalAttention(features=256, dtype=self.dtype)(x)
         x = BlurPool()(x)
         x = ConvNeXtBlock(features=512, dtype=self.dtype)(x)
+        x = GlobalAttention(features=512, dtype=self.dtype)(x)
         x = BlurPool()(x)
         
         x = nn.swish(x)

@@ -1,7 +1,7 @@
 import jax
 import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import GlobalAttention, SqueezeExcitation
+from models.layers import GlobalAttention
 
 class UpSamplePixelShuffle(nn.Module):
     """Depth-to-space upsampling (subpixel / pixel shuffle)."""
@@ -34,7 +34,7 @@ class MappingNetwork(nn.Module):
         return w
 
 class ResBlockGen(nn.Module):
-    """Style-modulated residual block with pixel-shuffle upsample and SE."""
+    """Style-modulated residual block with pixel-shuffle upsample."""
     features: int
     dtype: jnp.dtype = jnp.float32
 
@@ -54,7 +54,6 @@ class ResBlockGen(nn.Module):
         x = nn.swish(x)
         
         x = nn.Conv(self.features, (3, 3), padding="SAME", dtype=self.dtype)(x)
-        x = SqueezeExcitation(features=self.features, dtype=self.dtype)(x)
 
         B, H, W, C = shortcut.shape
         shortcut = jax.image.resize(
@@ -84,6 +83,7 @@ class Generator(nn.Module):
         x = ResBlockGen(features=128, dtype=self.dtype)(x, w)
         x = GlobalAttention(features=128, dtype=self.dtype)(x)
         x = ResBlockGen(features=64, dtype=self.dtype)(x, w)
+        x = GlobalAttention(features=64, dtype=self.dtype)(x)
         x = ResBlockGen(features=32, dtype=self.dtype)(x, w)
         x = nn.swish(x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME", dtype=self.dtype)(x)

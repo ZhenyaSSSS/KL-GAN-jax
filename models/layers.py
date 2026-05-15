@@ -15,41 +15,78 @@ class GeGLU(nn.Module):
         x, gate = jnp.split(x, 2, axis=-1)
         return x * nn.gelu(gate)
 
-class GlobalAttention(nn.Module):
-    """Linear Self-Attention for low-resolution feature maps."""
-    features: int
-    dtype: jnp.dtype = jnp.float32
-    
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        x_flat = x.reshape((B, H * W, C))
-        
-        qkv = nn.Dense(self.features * 3, dtype=self.dtype)(x_flat)
-        q, k, v = jnp.split(qkv, 3, axis=-1)
-        attn = jnp.einsum('bnc,bmc->bnm', q, k) * (self.features ** -0.5)
-        attn = jax.nn.softmax(attn, axis=-1)
-        
-        out = jnp.einsum('bnm,bmc->bnc', attn, v)
-        out = out.reshape((B, H, W, self.features))
-        
-        out = nn.Dense(C, dtype=self.dtype)(out)
-        return x + out
 
-class SqueezeExcitation(nn.Module):
-    """Channel attention (squeeze-and-excitation)."""
-    features: int
-    reduction: int = 4
+class GRN(nn.Module):
+    """Global Response Normalization (ConvNeXt V2): channel competition via spatial L2 energy."""
+
+    dim: int
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x):
-        se = jnp.mean(x, axis=(1, 2), keepdims=True)
-        se = nn.Dense(self.features // self.reduction, dtype=self.dtype)(se)
-        se = nn.swish(se)
-        se = nn.Dense(self.features, dtype=self.dtype)(se)
-        se = nn.sigmoid(se)
-        return x * se
+        gx = jnp.sqrt(jnp.sum(jnp.square(x.astype(jnp.float32)), axis=(1, 2), keepdims=True) + 1e-6).astype(
+            self.dtype
+        )
+        nx = gx / (jnp.mean(gx.astype(jnp.float32), axis=-1, keepdims=True) + 1e-6).astype(self.dtype)
+        gamma = self.param("gamma", nn.initializers.zeros_init(), (1, 1, 1, self.dim), self.dtype)
+        beta = self.param("beta", nn.initializers.zeros_init(), (1, 1, 1, self.dim), self.dtype)
+        return x * (1.0 + gamma * nx) + beta
+
+
+class GlobalAttention(nn.Module):
+    """Multi-head self-attention with QK GroupNorm and zero-init residual scale (gamma)."""
+
+    features: int
+    num_heads: int = 4
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x):
+        B, H, W, C = x.shape
+        if C != self.features:
+            raise ValueError(f"channel dim {C} must match features={self.features}")
+        if C % self.num_heads != 0:
+            raise ValueError(f"channels {C} must be divisible by num_heads={self.num_heads}")
+
+        head_dim = C // self.num_heads
+        n_tokens = H * W
+        x_flat = x.reshape((B, n_tokens, C))
+
+        qkv = nn.Dense(C * 3, use_bias=False, dtype=self.dtype)(x_flat)
+        q, k, v = jnp.split(qkv, 3, axis=-1)
+
+        q = q.reshape((B, n_tokens, self.num_heads, head_dim))
+        k = k.reshape((B, n_tokens, self.num_heads, head_dim))
+        v = v.reshape((B, n_tokens, self.num_heads, head_dim))
+
+        q_flat = q.reshape((B, n_tokens, C))
+        k_flat = k.reshape((B, n_tokens, C))
+        q_flat = nn.GroupNorm(
+            num_groups=self.num_heads,
+            use_bias=False,
+            use_scale=False,
+            dtype=jnp.float32,
+        )(q_flat).astype(self.dtype)
+        k_flat = nn.GroupNorm(
+            num_groups=self.num_heads,
+            use_bias=False,
+            use_scale=False,
+            dtype=jnp.float32,
+        )(k_flat).astype(self.dtype)
+        q = q_flat.reshape((B, n_tokens, self.num_heads, head_dim))
+        k = k_flat.reshape((B, n_tokens, self.num_heads, head_dim))
+
+        attn = jnp.einsum("bnhd,bmhd->bhnm", q, k) * (head_dim ** -0.5)
+        attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(self.dtype)
+
+        out = jnp.einsum("bhnm,bmhd->bnhd", attn, v)
+        out = out.reshape((B, n_tokens, C))
+        out = nn.Dense(C, dtype=self.dtype)(out)
+        out = out.reshape((B, H, W, C))
+
+        gamma = self.param("gamma", nn.initializers.constant(0.0), (1,), self.dtype)
+        return x + out * gamma
+
 
 class MinibatchDiscrimination(nn.Module):
     num_kernels: int = 100
