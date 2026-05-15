@@ -1,29 +1,59 @@
 import flax.linen as nn
 import jax.numpy as jnp
+from models.layers import MinibatchDiscrimination, BlurPool, GeGLU, GlobalAttention
 
-from models.layers import MinibatchDiscrimination
-
-
-class Discriminator(nn.Module):
-    use_sn: bool = False
-    num_kernels_mbd: int = 100
-    kernel_dim_mbd: int = 5
-    dtype: jnp.dtype = jnp.bfloat16
+class ConvNeXtBlock(nn.Module):
+    """Depthwise ConvNeXt-style block for Discriminator."""
+    features: int
+    dtype: jnp.dtype = jnp.float32
+    update_stats: bool = True
 
     @nn.compact
     def __call__(self, x):
-        x = nn.Conv(features=64, kernel_size=(4, 4), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
-        x = nn.leaky_relu(x, negative_slope=0.2)
+        shortcut = x
+        
+        # Depthwise Conv + SpectralNorm
+        x = nn.SpectralNorm(nn.Conv(x.shape[-1], (7, 7), padding="SAME", feature_group_count=x.shape[-1], dtype=self.dtype), update_stats=self.update_stats)(x)
+        x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
+        
+        # Pointwise Conv + GeGLU
+        x = nn.SpectralNorm(nn.Dense(self.features * 4 * 2, dtype=self.dtype), update_stats=self.update_stats)(x)
+        x = GeGLU()(x)
+        x = nn.SpectralNorm(nn.Dense(self.features, dtype=self.dtype), update_stats=self.update_stats)(x)
+        
+        if shortcut.shape[-1] != self.features:
+            shortcut = nn.SpectralNorm(nn.Dense(self.features, dtype=self.dtype), update_stats=self.update_stats)(shortcut)
+            
+        return x + shortcut
 
-        x = nn.Conv(features=128, kernel_size=(4, 4), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
-        # BN in float32 for numerical stability
-        x = nn.BatchNorm(use_running_average=False, dtype=jnp.float32)(x)
-        x = nn.leaky_relu(x, negative_slope=0.2)
+class Discriminator(nn.Module):
+    """SOTA Hybrid Discriminator with ConvNeXt blocks, BlurPool and Attention."""
+    use_sn: bool = True
+    num_kernels_mbd: int = 100
+    kernel_dim_mbd: int = 5
+    dtype: jnp.dtype = jnp.bfloat16
+    update_stats: bool = True
 
-        x = nn.Conv(features=256, kernel_size=(4, 4), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
-        x = nn.BatchNorm(use_running_average=False, dtype=jnp.float32)(x)
-        x = nn.leaky_relu(x, negative_slope=0.2)
-
+    @nn.compact
+    def __call__(self, x):
+        x = x.astype(self.dtype)
+        x = nn.SpectralNorm(nn.Conv(64, (3, 3), padding="SAME", dtype=self.dtype), update_stats=self.update_stats)(x)
+        x = nn.swish(x)
+        
+        # 32x32 -> 16x16
+        x = ConvNeXtBlock(features=128, dtype=self.dtype, update_stats=self.update_stats)(x)
+        x = BlurPool()(x)
+        
+        # 16x16 -> 8x8
+        x = ConvNeXtBlock(features=256, dtype=self.dtype, update_stats=self.update_stats)(x)
+        x = GlobalAttention(features=256, dtype=self.dtype)(x) # Attention на 8x8
+        x = BlurPool()(x)
+        
+        # 8x8 -> 4x4
+        x = ConvNeXtBlock(features=512, dtype=self.dtype, update_stats=self.update_stats)(x)
+        x = BlurPool()(x)
+        
+        x = nn.swish(x)
         x = x.reshape((x.shape[0], -1))
 
         x = MinibatchDiscrimination(
@@ -32,8 +62,5 @@ class Discriminator(nn.Module):
             dtype=self.dtype,
         )(x)
 
-        f = nn.Dense(features=256, dtype=self.dtype)(x)
-        
-        # Гарантируем, что выходные признаки всегда float32
-        # Это критически важно для стабильности вычисления KL-дивергенции и дисперсии
+        f = nn.SpectralNorm(nn.Dense(256, dtype=self.dtype), update_stats=self.update_stats)(x)
         return f.astype(jnp.float32)
