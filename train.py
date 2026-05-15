@@ -26,12 +26,12 @@ def pmap_get_batch(dataset, indices):
 
 def init_tpu():
     try:
-        import jax.tools.colab_tpu
-
-        jax.tools.colab_tpu.setup_tpu()
+        from jax.tools import colab_tpu
+        colab_tpu.setup_tpu()
         print("TPU initialized successfully!")
     except Exception as e:
         print("Not running on Kaggle/Colab TPU or already initialized.", e)
+    import jax
     print(f"JAX device count: {jax.device_count()}")
 
 
@@ -51,6 +51,9 @@ def create_image_grid(images, grid_size=(8, 8)):
 
     return grid
 
+
+class DTrainState(train_state.TrainState):
+    spectral_stats: flax.core.FrozenDict = flax.struct.field(pytree_node=True)
 
 def main():
     jax.config.update("jax_default_matmul_precision", config.jax_matmul_precision)
@@ -105,10 +108,18 @@ def main():
 
     @jax.pmap
     def init_d_state(key):
-        params = d_model.init(key, dummy_img)["params"]
-        return train_state.TrainState.create(apply_fn=d_model.apply, params=params, tx=tx_d)
+        variables = d_model.init(key, dummy_img)
+        return DTrainState.create(
+            apply_fn=d_model.apply, 
+            params=variables["params"], 
+            tx=tx_d,
+            spectral_stats=variables.get("spectral_stats", flax.core.freeze({}))
+        )
 
     d_state = init_d_state(d_keys)
+
+    # Initialize EMA params for Generator
+    ema_g_params = g_state.params
 
     rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (64, config.latent_dim), dtype=jnp.float32)
@@ -140,7 +151,7 @@ def main():
                 rng, *train_rngs = jax.random.split(rng, num_devices + 1)
                 train_rngs = jnp.array(train_rngs)
 
-                g_state, d_state, metrics = train_step(train_rngs, g_state, d_state, real_batch)
+                g_state, d_state, ema_g_params, metrics = train_step(train_rngs, g_state, d_state, ema_g_params, real_batch)
 
                 if epoch == 1 and _ == 0:
                     print(f"Compilation finished in {time.time() - compile_start:.2f} s.")
@@ -160,8 +171,9 @@ def main():
         }
         wandb.log(avg_metrics, step=epoch)
 
-        g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], g_state.params)
-        fake_test_images = g_model.apply({"params": g_params_cpu}, test_z)
+        # Evaluate using EMA params!
+        ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
+        fake_test_images = g_model.apply({"params": ema_g_params_cpu}, test_z)
         grid = create_image_grid(np.array(fake_test_images))
         wandb.log({"Generated Images": wandb.Image(grid)}, step=epoch)
 
@@ -172,7 +184,7 @@ def main():
 
             @jax.jit
             def gen_batch(z):
-                return g_model.apply({"params": g_params_cpu}, z)
+                return g_model.apply({"params": ema_g_params_cpu}, z)
 
             fake_eval = []
             for i in range(0, 1024, 128):
