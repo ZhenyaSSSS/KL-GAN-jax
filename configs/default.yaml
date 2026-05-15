@@ -15,7 +15,7 @@ lambda_div: 0.5
 # Model params
 image_size: 32
 channels: 3
-use_sn: false # Spectral normalization
+use_sn: false  # legacy; discriminator ignores this flag
 num_kernels_mbd: 100
 kernel_dim_mbd: 5
 

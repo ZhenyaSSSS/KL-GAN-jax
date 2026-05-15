@@ -4,21 +4,17 @@ import jax.numpy as jnp
 from models.layers import GlobalAttention, SqueezeExcitation
 
 class UpSamplePixelShuffle(nn.Module):
-    """Обучаемый Upsample (Subpixel Convolution). Дает максимальную резкость."""
+    """Depth-to-space upsampling (subpixel / pixel shuffle)."""
     features: int
     scale: int = 2
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x):
-        B, H, W, C = x.shape
-        
-        # Умножаем количество каналов на scale^2 (для scale=2 это в 4 раза больше)
+        B, H, W, _ = x.shape
         x = nn.Conv(self.features * (self.scale ** 2), (3, 3), padding="SAME", dtype=self.dtype)(x)
-        
-        # Хитрый reshape (Depth-to-Space): переводим каналы в пиксели H и W
         x = x.reshape((B, H, W, self.scale, self.scale, self.features))
-        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5)) # Перемешиваем оси
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
         x = x.reshape((B, H * self.scale, W * self.scale, self.features))
         
         return x
@@ -38,25 +34,19 @@ class MappingNetwork(nn.Module):
         return w
 
 class ResBlockGen(nn.Module):
-    """Style-based ResNet Block с PixelShuffle Upsampling и Squeeze-Excitation."""
+    """Style-modulated residual block with pixel-shuffle upsample and SE."""
     features: int
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x, w):
         shortcut = x
-        
-        # --- Block 1 ---
         style1 = nn.Dense(x.shape[-1] * 2, dtype=self.dtype)(w)
         scale1, shift1 = jnp.split(style1, 2, axis=-1)
-        x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype) # LayerNorm
+        x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype)
         x = x * (1.0 + jnp.expand_dims(scale1, (1, 2))) + jnp.expand_dims(shift1, (1, 2))
         x = nn.swish(x)
-        
-        # ХИТРЫЙ ОБУЧАЕМЫЙ АПСЕМПЛИНГ (вместо bilinear)
         x = UpSamplePixelShuffle(features=self.features, dtype=self.dtype)(x)
-        
-        # --- Block 2 ---
         style2 = nn.Dense(self.features * 2, dtype=self.dtype)(w)
         scale2, shift2 = jnp.split(style2, 2, axis=-1)
         x = nn.GroupNorm(num_groups=1, dtype=jnp.float32)(x).astype(self.dtype)
@@ -64,40 +54,37 @@ class ResBlockGen(nn.Module):
         x = nn.swish(x)
         
         x = nn.Conv(self.features, (3, 3), padding="SAME", dtype=self.dtype)(x)
-        
-        # ДОБАВЛЯЕМ SE (Внимание к каналам)
         x = SqueezeExcitation(features=self.features, dtype=self.dtype)(x)
-        
-        # --- Shortcut upsample ---
-        # Для шортката тоже используем PixelShuffle (но без нелинейностей)
-        shortcut = UpSamplePixelShuffle(features=self.features, dtype=self.dtype)(shortcut)
-            
+
+        B, H, W, C = shortcut.shape
+        shortcut = jax.image.resize(
+            shortcut, shape=(B, H * 2, W * 2, C), method="nearest"
+        )
+        if C != self.features:
+            shortcut = nn.Conv(
+                self.features,
+                (1, 1),
+                padding="SAME",
+                use_bias=False,
+                dtype=self.dtype,
+            )(shortcut)
+
         return x + shortcut
 
 class Generator(nn.Module):
-    """SOTA Style-based Generator."""
+    """Style-based generator: mapping network, residual blocks, optional attention."""
     channels: int = 3
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, z):
-        # 1. Считаем стиль W (в float32 для точности)
         w = MappingNetwork(features=256, dtype=jnp.float32)(z).astype(self.dtype)
-        
-        # 2. Инициализируем константный или проекционный тензор 4x4
         x = nn.Dense(256 * 4 * 4, dtype=self.dtype)(w)
         x = x.reshape((x.shape[0], 4, 4, 256))
-        
-        # 3. ResNet блоки с модуляцией стилем и Upsample (вместо ConvTranspose)
-        x = ResBlockGen(features=128, dtype=self.dtype)(x, w) # 4 -> 8
-        
-        # Self-Attention на 8x8, как в топовых GAN (внимание к глобальным деталям)
+        x = ResBlockGen(features=128, dtype=self.dtype)(x, w)
         x = GlobalAttention(features=128, dtype=self.dtype)(x)
-        
-        x = ResBlockGen(features=64, dtype=self.dtype)(x, w)  # 8 -> 16
-        x = ResBlockGen(features=32, dtype=self.dtype)(x, w)  # 16 -> 32
-        
-        # 4. Финальная проекция в RGB
+        x = ResBlockGen(features=64, dtype=self.dtype)(x, w)
+        x = ResBlockGen(features=32, dtype=self.dtype)(x, w)
         x = nn.swish(x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME", dtype=self.dtype)(x)
         x = nn.tanh(x)

@@ -10,12 +10,8 @@ class ConvNeXtBlock(nn.Module):
     @nn.compact
     def __call__(self, x):
         shortcut = x
-        
-        # Depthwise Conv + LayerNorm
         x = nn.Conv(x.shape[-1], (7, 7), padding="SAME", feature_group_count=x.shape[-1], dtype=self.dtype)(x)
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        
-        # Pointwise Conv + GeGLU
         x = nn.Dense(self.features * 4 * 2, dtype=self.dtype)(x)
         x = GeGLU()(x)
         x = nn.Dense(self.features, dtype=self.dtype)(x)
@@ -26,8 +22,8 @@ class ConvNeXtBlock(nn.Module):
         return x + shortcut
 
 class Discriminator(nn.Module):
-    """SOTA Hybrid Discriminator with ConvNeXt blocks, BlurPool and Attention."""
-    use_sn: bool = False # Deprecated, LayerNorm is used instead for stability
+    """ConvNeXt-style discriminator with BlurPool downsampling and self-attention."""
+    use_sn: bool = False  # unused; kept for config compatibility
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
     dtype: jnp.dtype = jnp.bfloat16
@@ -37,17 +33,11 @@ class Discriminator(nn.Module):
         x = x.astype(self.dtype)
         x = nn.Conv(64, (3, 3), padding="SAME", dtype=self.dtype)(x)
         x = nn.swish(x)
-        
-        # 32x32 -> 16x16
         x = ConvNeXtBlock(features=128, dtype=self.dtype)(x)
         x = BlurPool()(x)
-        
-        # 16x16 -> 8x8
         x = ConvNeXtBlock(features=256, dtype=self.dtype)(x)
-        x = GlobalAttention(features=256, dtype=self.dtype)(x) # Attention на 8x8
+        x = GlobalAttention(features=256, dtype=self.dtype)(x)
         x = BlurPool()(x)
-        
-        # 8x8 -> 4x4
         x = ConvNeXtBlock(features=512, dtype=self.dtype)(x)
         x = BlurPool()(x)
         

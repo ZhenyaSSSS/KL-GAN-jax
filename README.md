@@ -28,7 +28,7 @@ python train.py
 - `data/loader.py` — CelebA load + replicate dataset to devices  
 - `models/` — generator, discriminator, MBD  
 - `training/` — losses, `pmap` train step  
-- `metrics/` — lightweight KL probe, FID helper  
+- `metrics/` — ResNet feature KL (training), FID helper for offline use  
 - `train.py` — entrypoint  
 
 ## License

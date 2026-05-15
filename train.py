@@ -17,6 +17,10 @@ from models.discriminator import Discriminator
 from training.step import train_step
 from metrics.eval_resnet import load_pretrained_resnet, calculate_resnet_kl
 
+# Fixed latent batch size for @jax.jit gen_batch (avoids XLA recompile on shape changes).
+GEN_BATCH_SIZE = 256
+LOG_EVERY_STEPS = 20
+
 
 @jax.pmap
 def pmap_get_batch(dataset, indices):
@@ -30,7 +34,6 @@ def init_tpu():
         print("TPU initialized successfully!")
     except Exception as e:
         print("Not running on Kaggle/Colab TPU or already initialized.", e)
-    import jax
     print(f"JAX device count: {jax.device_count()}")
 
 
@@ -113,15 +116,13 @@ def main():
 
     d_state = init_d_state(d_keys)
 
-    # Initialize EMA params for Generator
     ema_g_params = g_state.params
 
     rng, test_z_rng = jax.random.split(rng)
-    test_z = jax.random.normal(test_z_rng, (64, config.latent_dim), dtype=jnp.float32)
+    test_z = jax.random.normal(test_z_rng, (GEN_BATCH_SIZE, config.latent_dim), dtype=jnp.float32)
 
     try:
         resnet_model = load_pretrained_resnet()
-        # Initialize the model with dummy data
         rng, resnet_rng = jax.random.split(rng)
         resnet_params = resnet_model.init(resnet_rng, jnp.ones((1, 32, 32, 3)))
         print("Successfully loaded pre-trained ResNet18 for KL divergence.")
@@ -130,20 +131,37 @@ def main():
         resnet_model = None
         resnet_params = None
 
-    on_host = np.asarray(jax.device_get(dataset_replicated))
+    # Replicated layout may be [num_devices, N, H, W, C]; slice one shard before host copy
+    # to avoid pulling all device copies into CPU RAM (device_get(X)[0] would fetch 8×).
+    on_host = np.asarray(jax.device_get(dataset_replicated[0]))
 
     @jax.jit
     def gen_batch(params, z):
         return g_model.apply({"params": params}, z)
 
+    def gen_batch_pad(params, z, n_take):
+        """Always compile-friendly GEN_BATCH_SIZE; returns host numpy of first n_take rows."""
+        n = int(z.shape[0])
+        if n > GEN_BATCH_SIZE:
+            raise ValueError(f"z batch {n} exceeds GEN_BATCH_SIZE={GEN_BATCH_SIZE}")
+        if n == GEN_BATCH_SIZE:
+            out = gen_batch(params, z)
+            return np.asarray(out[:n_take])
+        pad = GEN_BATCH_SIZE - n
+        z_pad = jnp.concatenate([z, jnp.zeros((pad, z.shape[1]), dtype=z.dtype)], axis=0)
+        out = gen_batch(params, z_pad)
+        return np.asarray(out[:n_take])
+
     print("Starting compilation...")
     compile_start = time.time()
+    global_step = 0
 
     for epoch in range(1, config.epochs + 1):
         epoch_loss_g, epoch_loss_d, epoch_skl, epoch_div = 0.0, 0.0, 0.0, 0.0
 
         with tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}/{config.epochs}") as pbar:
             for _ in range(steps_per_epoch):
+                step_start = time.time()
                 rng, idx_rng = jax.random.split(rng)
                 idx = jax.random.randint(
                     idx_rng,
@@ -162,71 +180,101 @@ def main():
                 if epoch == 1 and _ == 0:
                     print(f"Compilation finished in {time.time() - compile_start:.2f} s.")
 
-                epoch_loss_g += float(jnp.mean(metrics["loss_G"]))
-                epoch_loss_d += float(jnp.mean(metrics["loss_D"]))
-                epoch_skl += float(jnp.mean(metrics["SKL"]))
-                epoch_div += float(jnp.mean(metrics["Div_Loss"]))
+                loss_g_val = float(jnp.mean(metrics["loss_G"]))
+                loss_d_val = float(jnp.mean(metrics["loss_D"]))
+                skl_val = float(jnp.mean(metrics["SKL"]))
+                div_val = float(jnp.mean(metrics["Div_Loss"]))
 
+                epoch_loss_g += loss_g_val
+                epoch_loss_d += loss_d_val
+                epoch_skl += skl_val
+                epoch_div += div_val
+
+                step_time = time.time() - step_start
+                global_step += 1
+                imgs_per_step = num_devices * config.batch_size_per_device
+
+                if global_step % LOG_EVERY_STEPS == 0:
+                    mem_gb = 0.0
+                    try:
+                        dev = jax.local_devices()[0]
+                        if hasattr(dev, "memory_stats"):
+                            mem_gb = dev.memory_stats().get("bytes_in_use", 0) / (1024**3)
+                    except Exception:
+                        pass
+                    wandb.log(
+                        {
+                            "Step/Loss_G": loss_g_val,
+                            "Step/Loss_D": loss_d_val,
+                            "Step/SKL": skl_val,
+                            "Step/Div": div_val,
+                            "Perf/Step_Time_sec": step_time,
+                            "Perf/Images_Per_Sec": imgs_per_step / max(step_time, 1e-9),
+                            "Perf/Memory_Used_GB": mem_gb,
+                        },
+                        step=global_step,
+                    )
+
+                pbar.set_postfix(Loss_D=f"{loss_d_val:.3f}", Loss_G=f"{loss_g_val:.3f}")
                 pbar.update(1)
 
-        avg_metrics = {
-            "Train/Loss_G": epoch_loss_g / steps_per_epoch,
-            "Train/Loss_D": epoch_loss_d / steps_per_epoch,
-            "Train/SKL": epoch_skl / steps_per_epoch,
-            "Train/Diversity": epoch_div / steps_per_epoch,
-        }
-        wandb.log(avg_metrics, step=epoch)
+        wandb.log(
+            {
+                "Epoch/Loss_G": epoch_loss_g / steps_per_epoch,
+                "Epoch/Loss_D": epoch_loss_d / steps_per_epoch,
+                "Epoch/SKL": epoch_skl / steps_per_epoch,
+                "Epoch/Diversity": epoch_div / steps_per_epoch,
+            },
+            step=global_step,
+        )
 
-        # Evaluate using EMA params!
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
+        gen_start = time.time()
         fake_test_images = gen_batch(ema_g_params_cpu, test_z)
-        grid = create_image_grid(np.array(fake_test_images))
-        wandb.log({"Generated Images": wandb.Image(grid)}, step=epoch)
+        fake_test_images = np.asarray(fake_test_images)[:64]
+        print(f"Gen preview & device sync: {time.time() - gen_start:.2f}s")
+        grid = create_image_grid(fake_test_images)
+        wandb.log({"Generated Images": wandb.Image(grid)}, step=global_step)
 
         if epoch % config.eval_every_epochs == 0 and resnet_model is not None:
-            real_eval = on_host[:2048] # use 2048 samples for quick evaluation
+            real_eval = on_host[:2048]
             rng, z_rng = jax.random.split(rng)
             z_eval = jax.random.normal(z_rng, (2048, config.latent_dim), dtype=jnp.float32)
 
             fake_eval = []
-            for i in range(0, 2048, 256):
-                fake_eval.append(gen_batch(ema_g_params_cpu, z_eval[i : i + 256]))
+            for i in range(0, 2048, GEN_BATCH_SIZE):
+                z_chunk = z_eval[i : i + GEN_BATCH_SIZE]
+                fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk))
             fake_eval = jnp.concatenate(fake_eval, axis=0)
 
             kl_score = calculate_resnet_kl(real_eval, fake_eval, resnet_model, resnet_params)
-            wandb.log({"Val/ResNet18_KL": float(kl_score)}, step=epoch)
+            wandb.log({"Val/ResNet18_KL": float(kl_score)}, step=global_step)
             print(f"Epoch {epoch} | ResNet18_KL: {float(kl_score):.4f}")
 
         if epoch % config.fid_every_epochs == 0 or epoch == config.epochs:
             fake_images_fid = []
-            for i in tqdm(range(0, config.num_fid_samples, 256), desc="Generating FID samples"):
+            for i in tqdm(range(0, config.num_fid_samples, GEN_BATCH_SIZE), desc="Generating FID samples"):
+                need = min(GEN_BATCH_SIZE, config.num_fid_samples - i)
                 rng, z_rng = jax.random.split(rng)
-                z_batch = jax.random.normal(
-                    z_rng,
-                    (min(256, config.num_fid_samples - i), config.latent_dim),
-                    dtype=jnp.float32,
-                )
-                fake_images_fid.append(np.array(gen_batch(ema_g_params_cpu, z_batch)))
+                z_small = jax.random.normal(z_rng, (need, config.latent_dim), dtype=jnp.float32)
+                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need))
             fake_images_fid = np.concatenate(fake_images_fid, axis=0)
 
-            # Сохраняем картинки для локального подсчета FID
             os.makedirs("/kaggle/working/fid_samples", exist_ok=True)
             np.save(f"/kaggle/working/fid_samples/fake_images_epoch_{epoch}.npy", fake_images_fid)
-            
-            # Сохраняем веса генератора
             try:
                 from flax.training import checkpoints
                 checkpoints.save_checkpoint(
-                    ckpt_dir="/kaggle/working/checkpoints", 
-                    target=ema_g_params_cpu, 
-                    step=epoch, 
-                    prefix="g_ema_", 
-                    keep=3
+                    ckpt_dir="/kaggle/working/checkpoints",
+                    target=ema_g_params_cpu,
+                    step=epoch,
+                    prefix="g_ema_",
+                    keep=3,
                 )
                 print(f"Saved checkpoint and FID samples to /kaggle/working/ for epoch {epoch}")
             except ImportError:
-                # Fallback, если вдруг checkpoints.save_checkpoint не доступен (устарел в свежих flax, где теперь orbax)
                 import pickle
+
                 os.makedirs("/kaggle/working/checkpoints", exist_ok=True)
                 with open(f"/kaggle/working/checkpoints/g_ema_{epoch}.pkl", "wb") as f:
                     pickle.dump(ema_g_params_cpu, f)

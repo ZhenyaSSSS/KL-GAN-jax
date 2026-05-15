@@ -6,7 +6,6 @@ class BlurPool(nn.Module):
     """Anti-aliasing filter (BlurPool) for downsampling."""
     @nn.compact
     def __call__(self, x):
-        # Простой и быстрый 2x2 Average Pool для антиалиасинга перед свертками
         return nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
 
 class GeGLU(nn.Module):
@@ -28,8 +27,6 @@ class GlobalAttention(nn.Module):
         
         qkv = nn.Dense(self.features * 3, dtype=self.dtype)(x_flat)
         q, k, v = jnp.split(qkv, 3, axis=-1)
-        
-        # Простейший Scaled Dot-Product Attention
         attn = jnp.einsum('bnc,bmc->bnm', q, k) * (self.features ** -0.5)
         attn = jax.nn.softmax(attn, axis=-1)
         
@@ -40,25 +37,18 @@ class GlobalAttention(nn.Module):
         return x + out
 
 class SqueezeExcitation(nn.Module):
-    """Механизм внимания к каналам (Channel Attention)"""
+    """Channel attention (squeeze-and-excitation)."""
     features: int
     reduction: int = 4
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x):
-        # 1. Global Average Pooling (сжимаем H и W в 1 пиксель)
         se = jnp.mean(x, axis=(1, 2), keepdims=True)
-        
-        # 2. Squeeze (уменьшаем размерность)
         se = nn.Dense(self.features // self.reduction, dtype=self.dtype)(se)
         se = nn.swish(se)
-        
-        # 3. Excitation (возвращаем размерность и переводим в диапазон 0..1)
         se = nn.Dense(self.features, dtype=self.dtype)(se)
         se = nn.sigmoid(se)
-        
-        # 4. Умножаем исходные каналы на их "важность"
         return x * se
 
 class MinibatchDiscrimination(nn.Module):
@@ -71,7 +61,6 @@ class MinibatchDiscrimination(nn.Module):
         T = nn.Dense(self.num_kernels * self.kernel_dim, use_bias=False, dtype=self.dtype)(x)
         T = T.reshape((x.shape[0], self.num_kernels, self.kernel_dim))
 
-        # Вычисляем разницы и экспоненту в float32
         T_f32 = T.astype(jnp.float32)
         diffs = jnp.expand_dims(T_f32, 1) - jnp.expand_dims(T_f32, 0)
         abs_diffs = jnp.sum(jnp.abs(diffs), axis=-1)
