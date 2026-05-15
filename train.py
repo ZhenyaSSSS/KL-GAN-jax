@@ -15,7 +15,6 @@ from data.loader import load_dataset_replicated
 from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
-from metrics.fid_score import compute_fid
 
 
 @jax.pmap
@@ -184,10 +183,28 @@ def main():
                 fake_images_fid.append(np.array(gen_batch(ema_g_params_cpu, z_batch)))
             fake_images_fid = np.concatenate(fake_images_fid, axis=0)
 
-            real_images_fid = on_host[: config.num_fid_samples]
-            fid_score = compute_fid(real_images_fid, fake_images_fid)
-            wandb.log({"Val/FID": fid_score}, step=epoch)
-            print(f"Epoch {epoch} | FID: {fid_score:.4f}")
+            # Сохраняем картинки для локального подсчета FID
+            os.makedirs("/kaggle/working/fid_samples", exist_ok=True)
+            np.save(f"/kaggle/working/fid_samples/fake_images_epoch_{epoch}.npy", fake_images_fid)
+            
+            # Сохраняем веса генератора
+            try:
+                from flax.training import checkpoints
+                checkpoints.save_checkpoint(
+                    ckpt_dir="/kaggle/working/checkpoints", 
+                    target=ema_g_params_cpu, 
+                    step=epoch, 
+                    prefix="g_ema_", 
+                    keep=3
+                )
+                print(f"Saved checkpoint and FID samples to /kaggle/working/ for epoch {epoch}")
+            except ImportError:
+                # Fallback, если вдруг checkpoints.save_checkpoint не доступен (устарел в свежих flax, где теперь orbax)
+                import pickle
+                os.makedirs("/kaggle/working/checkpoints", exist_ok=True)
+                with open(f"/kaggle/working/checkpoints/g_ema_{epoch}.pkl", "wb") as f:
+                    pickle.dump(ema_g_params_cpu, f)
+                print(f"Saved weights (pickle) and FID samples to /kaggle/working/ for epoch {epoch}")
 
     wandb.finish()
     print("Training complete.")
