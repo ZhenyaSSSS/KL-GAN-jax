@@ -52,9 +52,6 @@ def create_image_grid(images, grid_size=(8, 8)):
     return grid
 
 
-class DTrainState(train_state.TrainState):
-    spectral_stats: flax.core.FrozenDict = flax.struct.field(pytree_node=True)
-
 def main():
     jax.config.update("jax_default_matmul_precision", config.jax_matmul_precision)
 
@@ -109,11 +106,10 @@ def main():
     @jax.pmap
     def init_d_state(key):
         variables = d_model.init(key, dummy_img)
-        return DTrainState.create(
+        return train_state.TrainState.create(
             apply_fn=d_model.apply, 
             params=variables["params"], 
-            tx=tx_d,
-            spectral_stats=variables.get("spectral_stats", flax.core.freeze({}))
+            tx=tx_d
         )
 
     d_state = init_d_state(d_keys)

@@ -8,23 +8,13 @@ from config import config
 def train_step(rng, g_state, d_state, ema_g_params, real_images):
     z = jax.random.normal(rng, (real_images.shape[0], config.latent_dim))
     
-    # 1. Считаем градиенты Дискриминатора и обновляем SpectralNorm статистику
+    # 1. Считаем градиенты Дискриминатора
     def d_loss_fn(d_params):
-        f_real, mutated_vars = d_state.apply_fn(
-            {"params": d_params, "spectral_stats": d_state.spectral_stats},
-            real_images,
-            mutable=["spectral_stats"],
-            update_stats=True
-        )
-        new_spectral_stats = mutated_vars["spectral_stats"]
+        f_real = d_state.apply_fn({"params": d_params}, real_images)
         
-        # Получаем фейки с ТЕКУЩЕГО генератора (без обновления статов)
+        # Получаем фейки с ТЕКУЩЕГО генератора
         fake_images = g_state.apply_fn({"params": g_state.params}, z)
-        f_fake = d_state.apply_fn(
-            {"params": d_params, "spectral_stats": new_spectral_stats},
-            fake_images,
-            update_stats=False
-        )
+        f_fake = d_state.apply_fn({"params": d_params}, fake_images)
 
         mu_r, var_r = calc_stats(f_real)
         mu_f, var_f = calc_stats(f_fake)
@@ -34,18 +24,14 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
         div_loss = contrastive_diversity_loss(mu_r, all_mu_real)
         
         loss_D = -skl + (config.lambda_div * div_loss)
-        return loss_D, (new_spectral_stats, skl, div_loss, mu_r, var_r)
+        return loss_D, (skl, div_loss, mu_r, var_r)
 
-    grads_d, (new_spectral_stats, skl, div_loss, mu_r, var_r) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
+    grads_d, (skl, div_loss, mu_r, var_r) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
     
     # 2. Считаем градиенты Генератора (D заморожен)
     def g_loss_fn(g_params):
         fake_images = g_state.apply_fn({"params": g_params}, z)
-        f_fake = d_state.apply_fn(
-            {"params": d_state.params, "spectral_stats": new_spectral_stats},
-            fake_images,
-            update_stats=False
-        )
+        f_fake = d_state.apply_fn({"params": d_state.params}, fake_images)
         
         mu_f, var_f = calc_stats(f_fake)
         loss_G = symmetric_kl_loss(mu_r, var_r, mu_f, var_f)
@@ -58,7 +44,7 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
     
     # Обновляем состояния
     new_g_state = g_state.apply_gradients(grads=grads_g)
-    new_d_state = d_state.apply_gradients(grads=grads_d).replace(spectral_stats=new_spectral_stats)
+    new_d_state = d_state.apply_gradients(grads=grads_d)
     
     # 3. EMA шаг
     def update_ema(ema, p):
