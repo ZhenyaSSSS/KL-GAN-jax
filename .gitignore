@@ -10,7 +10,7 @@ venv/
 .env.*
 
 wandb/
-data/
+data/celeba/
 tmp/
 *.msgpack
 *.npz
