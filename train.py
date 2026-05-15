@@ -15,6 +15,7 @@ from data.loader import load_dataset_replicated
 from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
+from metrics.eval_resnet import load_pretrained_resnet, calculate_resnet_kl
 
 
 @jax.pmap
@@ -118,6 +119,17 @@ def main():
     rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (64, config.latent_dim), dtype=jnp.float32)
 
+    try:
+        resnet_model = load_pretrained_resnet()
+        # Initialize the model with dummy data
+        rng, resnet_rng = jax.random.split(rng)
+        resnet_params = resnet_model.init(resnet_rng, jnp.ones((1, 32, 32, 3)))
+        print("Successfully loaded pre-trained ResNet18 for KL divergence.")
+    except Exception as e:
+        print(f"Failed to load ResNet18: {e}")
+        resnet_model = None
+        resnet_params = None
+
     on_host = np.asarray(jax.device_get(dataset_replicated))
 
     @jax.jit
@@ -170,6 +182,20 @@ def main():
         fake_test_images = gen_batch(ema_g_params_cpu, test_z)
         grid = create_image_grid(np.array(fake_test_images))
         wandb.log({"Generated Images": wandb.Image(grid)}, step=epoch)
+
+        if epoch % config.eval_every_epochs == 0 and resnet_model is not None:
+            real_eval = on_host[:2048] # use 2048 samples for quick evaluation
+            rng, z_rng = jax.random.split(rng)
+            z_eval = jax.random.normal(z_rng, (2048, config.latent_dim), dtype=jnp.float32)
+
+            fake_eval = []
+            for i in range(0, 2048, 256):
+                fake_eval.append(gen_batch(ema_g_params_cpu, z_eval[i : i + 256]))
+            fake_eval = jnp.concatenate(fake_eval, axis=0)
+
+            kl_score = calculate_resnet_kl(real_eval, fake_eval, resnet_model, resnet_params)
+            wandb.log({"Val/ResNet18_KL": float(kl_score)}, step=epoch)
+            print(f"Epoch {epoch} | ResNet18_KL: {float(kl_score):.4f}")
 
         if epoch % config.fid_every_epochs == 0 or epoch == config.epochs:
             fake_images_fid = []
