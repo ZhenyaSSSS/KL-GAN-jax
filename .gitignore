@@ -20,3 +20,6 @@ tmp/
 .idea/
 .vscode/
 *.log
+
+# Local bundle dump (regenerate with bundle script)
+kl_gan_tpu_full_code.txt
