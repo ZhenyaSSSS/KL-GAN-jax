@@ -3,7 +3,7 @@
 seed: 42
 
 # Training params
-batch_size_per_device: 64
+batch_size_per_device: 16
 epochs: 500
 lr_gen: 0.0002
 lr_disc: 0.0002
@@ -16,7 +16,7 @@ diversity_temperature: 0.5
 # Model params
 image_size: 64
 channels: 16
-latent_scaling_factor: 1.345 # EMPIRICAL_STD
+latent_scaling_factor: 2.35711
 latent_npy_path: "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents/ffhq_latents_64x64x16.npy"
 
 use_sn: false  # legacy; discriminator ignores this flag
