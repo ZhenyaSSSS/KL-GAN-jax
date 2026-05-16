@@ -11,7 +11,7 @@ from tqdm import tqdm
 import numpy as np
 
 from config import config
-from data.loader import load_dataset_replicated
+from data.loader import load_dataset_sharded
 from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
@@ -23,8 +23,8 @@ LOG_EVERY_STEPS = 20
 
 
 @jax.pmap
-def pmap_get_batch(dataset, indices):
-    return jnp.take(dataset, indices, axis=0)
+def pmap_get_batch(dataset_shard, indices):
+    return jnp.take(dataset_shard, indices, axis=0)
 
 
 def init_tpu():
@@ -77,8 +77,9 @@ def main():
 
     rng = jax.random.PRNGKey(config.seed)
 
-    print("Loading and replicating full dataset to all devices...")
-    dataset_replicated, num_samples = load_dataset_replicated(image_size=config.image_size)
+    print("Loading and sharding full dataset across devices...")
+    dataset_sharded, samples_per_device = load_dataset_sharded(image_size=config.image_size)
+    num_samples = samples_per_device * num_devices
     if num_samples < config.batch_size_per_device:
         raise ValueError("Dataset smaller than per-device batch size.")
     steps_per_epoch = num_samples // config.batch_size_per_device
@@ -134,9 +135,8 @@ def main():
         resnet_model = None
         resnet_params = None
 
-    # Replicated layout may be [num_devices, N, H, W, C]; slice one shard before host copy
-    # to avoid pulling all device copies into CPU RAM (device_get(X)[0] would fetch 8×).
-    on_host = np.asarray(jax.device_get(dataset_replicated[0]))
+    # We pull a small chunk of real images back to host for ResNet eval
+    on_host = np.asarray(jax.device_get(dataset_sharded[0]))
 
     @jax.jit
     def gen_batch(params, z, noise_rng):
@@ -170,10 +170,10 @@ def main():
                     idx_rng,
                     (num_devices, config.batch_size_per_device),
                     0,
-                    num_samples,
+                    samples_per_device,
                     dtype=jnp.int32,
                 )
-                real_batch = pmap_get_batch(dataset_replicated, idx)
+                real_batch = pmap_get_batch(dataset_sharded, idx)
 
                 rng, *train_rngs = jax.random.split(rng, num_devices + 1)
                 train_rngs = jnp.array(train_rngs)

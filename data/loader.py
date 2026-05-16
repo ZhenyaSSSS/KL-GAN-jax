@@ -93,14 +93,25 @@ def get_celeba_array(data_dir: str = "./data/celeba", image_size: int = 32):
     return data_array
 
 
-def load_dataset_replicated(data_dir: str = "./data/celeba", image_size: int = 32):
-    """Replicates the full dataset on every local device (each critic sees the same pool)."""
+def load_dataset_sharded(data_dir: str = "./data/celeba", image_size: int = 32):
+    """Shards the full dataset across local devices to save HBM and avoid host-device transfers."""
     data_array = get_celeba_array(data_dir, image_size)
     num_samples = int(data_array.shape[0])
+    
     devices = jax.local_devices()
-    replicated = jax.device_put_replicated(jnp.asarray(data_array), devices)
-    print(
-        f"Replicated full dataset ({num_samples} images) to {len(devices)} devices; "
-        f"~{data_array.nbytes * len(devices) / (1024**3):.2f} GB total across devices."
-    )
-    return replicated, num_samples
+    num_devices = len(devices)
+    
+    # Pad to make it divisible by num_devices
+    pad_size = (num_devices - (num_samples % num_devices)) % num_devices
+    if pad_size > 0:
+        data_array = np.concatenate([data_array, data_array[:pad_size]], axis=0)
+    
+    samples_per_device = data_array.shape[0] // num_devices
+    
+    # Reshape to [num_devices, samples_per_device, H, W, C]
+    data_array = data_array.reshape(num_devices, samples_per_device, *data_array.shape[1:])
+    
+    sharded = jax.device_put_sharded(list(data_array), devices)
+    print(f"Sharded full dataset ({num_samples} images + {pad_size} pad) across {num_devices} devices; "
+          f"~{data_array[0].nbytes / (1024**2):.2f} MB per device.")
+    return sharded, samples_per_device
