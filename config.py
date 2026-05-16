@@ -19,7 +19,7 @@ def _parse_dtype(name: str):
 class Config:
     seed: int = 42
     
-    batch_size_per_device: int = 16
+    batch_size_per_device: int = 32
     epochs: int = 500
     lr_gen: float = 0.0001
     lr_disc: float = 0.00005

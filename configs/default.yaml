@@ -3,7 +3,7 @@
 seed: 42
 
 # Training params
-batch_size_per_device: 16
+batch_size_per_device: 32
 epochs: 500
 lr_gen: 0.0002
 lr_disc: 0.0002

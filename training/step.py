@@ -44,7 +44,6 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
     grads_g, loss_G = jax.grad(g_loss_fn, has_aux=True)(g_state.params)
 
     grads_g = jax.lax.pmean(grads_g, axis_name="tpu_nodes")
-    grads_d = jax.lax.pmean(grads_d, axis_name="tpu_nodes")
 
     new_g_state = g_state.apply_gradients(grads=grads_g)
     new_d_state = d_state.apply_gradients(grads=grads_d)
