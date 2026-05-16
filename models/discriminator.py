@@ -7,6 +7,7 @@ class DiscBlock(nn.Module):
     features: int
     num_heads: int = 4
     use_attn: bool = True
+    attn_reduction: int = 4
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
@@ -22,7 +23,7 @@ class DiscBlock(nn.Module):
             attn_out = SpatialReductionAttention(
                 features=self.features, 
                 num_heads=self.num_heads, 
-                reduction_ratio=2,
+                reduction_ratio=self.attn_reduction,
                 dtype=self.dtype
             )(x_local)
             x = x_local + attn_out

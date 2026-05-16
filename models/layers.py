@@ -161,7 +161,7 @@ class HybridDiTBlock(nn.Module):
         attn_out = SpatialReductionAttention(
             features=self.features, 
             num_heads=self.num_heads, 
-            reduction_ratio=2,
+            reduction_ratio=4,
             dtype=self.dtype
         )(x_local)
 
