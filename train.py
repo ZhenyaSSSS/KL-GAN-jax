@@ -96,9 +96,19 @@ def main():
 
     tx_g = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate=config.lr_gen, b1=config.beta1, b2=config.beta2),
+        optax.adamw(
+            learning_rate=config.lr_gen,
+            b1=config.beta1,
+            b2=config.beta2,
+            weight_decay=1e-4,
+        ),
     )
-    tx_d = optax.adam(learning_rate=config.lr_disc, b1=config.beta1, b2=config.beta2)
+    tx_d = optax.adamw(
+        learning_rate=config.lr_disc,
+        b1=config.beta1,
+        b2=config.beta2,
+        weight_decay=1e-4,
+    )
 
     rng, init_g_rng, init_noise_rng = jax.random.split(rng, 3)
     dummy_z = jnp.ones((1, config.latent_dim), dtype=jnp.float32)
