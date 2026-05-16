@@ -32,32 +32,30 @@ class GRN(nn.Module):
 
 
 def apply_rotary_emb(x, cos, sin):
-    xf = x.astype(jnp.float32)
-    d = xf.shape[-1] // 2
-    x1, x2 = xf[..., :d], xf[..., d:]
+    d = x.shape[-1] // 2
+    x1, x2 = x[..., :d], x[..., d:]
     x_rot = jnp.concatenate([-x2, x1], axis=-1)
-    c = cos.astype(jnp.float32)
-    s = sin.astype(jnp.float32)
-    out = (xf * c) + (x_rot * s)
-    return out.astype(x.dtype)
+    return (x * cos) + (x_rot * sin)
 
 
-def get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1):
+def get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1, dtype=jnp.float32):
+    import numpy as np
     if head_dim % 4 != 0:
         raise ValueError(f"head_dim {head_dim} must be divisible by 4 for 2D RoPE")
     half_dim = head_dim // 2
-    inv_freq = 1.0 / (10000 ** (jnp.arange(0, half_dim, 2, dtype=jnp.float32) / half_dim))
-    pos_y = jnp.arange(0, H * reduction_ratio, reduction_ratio, dtype=jnp.float32)
-    pos_x = jnp.arange(0, W * reduction_ratio, reduction_ratio, dtype=jnp.float32)
-    freqs_y = jnp.einsum("i,j->ij", pos_y, inv_freq)
-    freqs_x = jnp.einsum("i,j->ij", pos_x, inv_freq)
-    freqs_y = jnp.broadcast_to(freqs_y[:, None, :], (pos_y.shape[0], pos_x.shape[0], freqs_y.shape[-1]))
-    freqs_x = jnp.broadcast_to(freqs_x[None, :, :], (pos_y.shape[0], pos_x.shape[0], freqs_x.shape[-1]))
-    freqs = jnp.concatenate([freqs_y, freqs_x], axis=-1)
-    emb = jnp.concatenate([freqs, freqs], axis=-1)
-    cos = jnp.cos(emb)
-    sin = jnp.sin(emb)
-    return cos[None, ..., None, :], sin[None, ..., None, :]
+    inv_freq = 1.0 / (10000 ** (np.arange(0, half_dim, 2, dtype=np.float32) / half_dim))
+    pos_y = np.arange(0, H * reduction_ratio, reduction_ratio, dtype=np.float32)
+    pos_x = np.arange(0, W * reduction_ratio, reduction_ratio, dtype=np.float32)
+    freqs_y = np.einsum("i,j->ij", pos_y, inv_freq)
+    freqs_x = np.einsum("i,j->ij", pos_x, inv_freq)
+    freqs_y = np.broadcast_to(freqs_y[:, None, :], (pos_y.shape[0], pos_x.shape[0], freqs_y.shape[-1]))
+    freqs_x = np.broadcast_to(freqs_x[None, :, :], (pos_y.shape[0], pos_x.shape[0], freqs_x.shape[-1]))
+    freqs = np.concatenate([freqs_y, freqs_x], axis=-1)
+    emb = np.concatenate([freqs, freqs], axis=-1)
+    cos = np.cos(emb)
+    sin = np.sin(emb)
+    # Возвращаем статические константы (jnp.asarray превратит их в frozen constants в графе XLA)
+    return jnp.asarray(cos[None, ..., None, :], dtype=dtype), jnp.asarray(sin[None, ..., None, :], dtype=dtype)
 
 
 class SpatialReductionAttention(nn.Module):
@@ -73,7 +71,7 @@ class SpatialReductionAttention(nn.Module):
         head_dim = C // self.num_heads
         n_tokens_q = H * W
 
-        cos_q, sin_q = get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1)
+        cos_q, sin_q = get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1, dtype=self.dtype)
 
         x_flat = x.reshape((B, n_tokens_q, C))
         q = nn.Dense(C, use_bias=False, dtype=self.dtype)(x_flat)
@@ -87,9 +85,9 @@ class SpatialReductionAttention(nn.Module):
                 window_shape=(self.reduction_ratio, self.reduction_ratio),
                 strides=(self.reduction_ratio, self.reduction_ratio),
             )
-            Hr = x_reduced.shape[1]
-            Wr = x_reduced.shape[2]
-            cos_k, sin_k = get_2d_rope_sin_cos(Hr, Wr, head_dim, reduction_ratio=self.reduction_ratio)
+            Hr = H // self.reduction_ratio
+            Wr = W // self.reduction_ratio
+            cos_k, sin_k = get_2d_rope_sin_cos(Hr, Wr, head_dim, reduction_ratio=self.reduction_ratio, dtype=self.dtype)
         else:
             x_reduced = x
             Hr, Wr = H, W
