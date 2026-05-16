@@ -63,21 +63,21 @@ class Discriminator(nn.Module):
         
         # Stage 1: 32x32 (с Attention)
         for _ in range(2):
-            x = DiscBlock(features=self.base_features, use_attn=True, dtype=self.dtype)(x)
+            x = nn.remat(DiscBlock)(features=self.base_features, use_attn=True, dtype=self.dtype)(x)
             
         # Downsample: 32x32 -> 16x16
         x = nn.Conv(self.base_features * 2, (3, 3), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
         
         # Stage 2: 16x16 (только локальные текстуры ConvNeXt)
         for _ in range(2):
-            x = DiscBlock(features=self.base_features * 2, use_attn=False, dtype=self.dtype)(x)
+            x = nn.remat(DiscBlock)(features=self.base_features * 2, use_attn=False, dtype=self.dtype)(x)
             
         # Downsample: 16x16 -> 8x8
         x = nn.Conv(self.base_features * 4, (3, 3), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
         
         # Stage 3: 8x8 (только локальные текстуры ConvNeXt)
         for _ in range(2):
-            x = DiscBlock(features=self.base_features * 4, use_attn=False, dtype=self.dtype)(x)
+            x = nn.remat(DiscBlock)(features=self.base_features * 4, use_attn=False, dtype=self.dtype)(x)
             
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.swish(x)

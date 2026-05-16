@@ -58,7 +58,7 @@ class Generator(nn.Module):
         x = x.astype(self.dtype)
 
         for _ in range(self.depth):
-            x = HybridDiTBlock(features=self.features, dtype=self.dtype)(x, w)
+            x = nn.remat(HybridDiTBlock)(features=self.features, dtype=self.dtype)(x, w)
 
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.Dense(self.channels, kernel_init=nn.initializers.zeros_init(), dtype=self.dtype)(x)
