@@ -30,53 +30,50 @@ class GRN(nn.Module):
         beta = self.param("beta", nn.initializers.zeros_init(), (1, 1, 1, self.dim), self.dtype)
         return x * (1.0 + gamma * nx) + beta
 
-class GlobalAttention(nn.Module):
-    """Multi-head self-attention with QK GroupNorm and zero-init residual scale (gamma)."""
+class SpatialReductionAttention(nn.Module):
+    """Эффективный Attention: Q в полном разрешении, K и V в сжатом."""
     features: int
     num_heads: int = 4
+    reduction_ratio: int = 2
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x):
         B, H, W, C = x.shape
-        if C != self.features:
-            raise ValueError(f"channel dim {C} must match features={self.features}")
-        if C % self.num_heads != 0:
-            raise ValueError(f"channels {C} must be divisible by num_heads={self.num_heads}")
-
         head_dim = C // self.num_heads
-        n_tokens = H * W
-        x_flat = x.reshape((B, n_tokens, C))
+        n_tokens_q = H * W
+        
+        x_flat = x.reshape((B, n_tokens_q, C))
+        q = nn.Dense(C, use_bias=False, dtype=self.dtype)(x_flat)
+        
+        if self.reduction_ratio > 1:
+            x_reduced = nn.avg_pool(
+                x, 
+                window_shape=(self.reduction_ratio, self.reduction_ratio), 
+                strides=(self.reduction_ratio, self.reduction_ratio)
+            )
+        else:
+            x_reduced = x
+            
+        n_tokens_kv = x_reduced.shape[1] * x_reduced.shape[2]
+        x_reduced_flat = x_reduced.reshape((B, n_tokens_kv, C))
+        
+        kv = nn.Dense(C * 2, use_bias=False, dtype=self.dtype)(x_reduced_flat)
+        k, v = jnp.split(kv, 2, axis=-1)
 
-        qkv = nn.Dense(C * 3, use_bias=False, dtype=self.dtype)(x_flat)
-        q, k, v = jnp.split(qkv, 3, axis=-1)
+        q = q.reshape((B, n_tokens_q, self.num_heads, head_dim))
+        k = k.reshape((B, n_tokens_kv, self.num_heads, head_dim))
+        v = v.reshape((B, n_tokens_kv, self.num_heads, head_dim))
 
-        q = q.reshape((B, n_tokens, self.num_heads, head_dim))
-        k = k.reshape((B, n_tokens, self.num_heads, head_dim))
-        v = v.reshape((B, n_tokens, self.num_heads, head_dim))
-
-        q_flat = q.reshape((B, n_tokens, C))
-        k_flat = k.reshape((B, n_tokens, C))
-        q_flat = nn.GroupNorm(
-            num_groups=self.num_heads,
-            use_bias=False,
-            use_scale=False,
-            dtype=jnp.float32,
-        )(q_flat).astype(self.dtype)
-        k_flat = nn.GroupNorm(
-            num_groups=self.num_heads,
-            use_bias=False,
-            use_scale=False,
-            dtype=jnp.float32,
-        )(k_flat).astype(self.dtype)
-        q = q_flat.reshape((B, n_tokens, self.num_heads, head_dim))
-        k = k_flat.reshape((B, n_tokens, self.num_heads, head_dim))
+        q = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(q.reshape((B, n_tokens_q, C))).reshape((B, n_tokens_q, self.num_heads, head_dim))
+        k = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(k.reshape((B, n_tokens_kv, C))).reshape((B, n_tokens_kv, self.num_heads, head_dim))
 
         attn = jnp.einsum("bnhd,bmhd->bhnm", q, k) * (head_dim ** -0.5)
         attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(self.dtype)
 
         out = jnp.einsum("bhnm,bmhd->bnhd", attn, v)
-        out = out.reshape((B, n_tokens, C))
+        out = out.reshape((B, n_tokens_q, C))
+        
         out = nn.Dense(C, dtype=self.dtype)(out)
         out = out.reshape((B, H, W, C))
 
@@ -129,7 +126,7 @@ class AdaLNZero(nn.Module):
         style_params = nn.Dense(
             self.features * 6, 
             kernel_init=nn.initializers.zeros_init(), 
-            bias_init=nn.initializers.zeros_init(),
+            bias_init=nn.initializers.constant(0.01),
             dtype=self.dtype
         )(w)
         
@@ -161,15 +158,12 @@ class HybridDiTBlock(nn.Module):
             self.features, (7, 7), padding="SAME", feature_group_count=self.features, dtype=self.dtype
         )(x_modulated)
 
-        B, H, W, C = x_local.shape
-        x_flat = x_local.reshape((B, H * W, C))
-        attn_out = nn.SelfAttention(
-            num_heads=self.num_heads,
-            qkv_features=self.features,
-            out_features=self.features,
-            dtype=self.dtype,
-        )(x_flat)
-        attn_out = attn_out.reshape((B, H, W, C))
+        attn_out = SpatialReductionAttention(
+            features=self.features, 
+            num_heads=self.num_heads, 
+            reduction_ratio=2,
+            dtype=self.dtype
+        )(x_local)
 
         x = x + gate_s * (x_local + attn_out)
 

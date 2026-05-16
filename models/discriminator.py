@@ -1,11 +1,12 @@
 import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import GeGLU, MinibatchDiscrimination
+from models.layers import GeGLU, MinibatchDiscrimination, SpatialReductionAttention
 
 class DiscBlock(nn.Module):
-    """Изотропный блок дискриминатора (ConvNeXt + Attn) без AdaLN"""
+    """Изотропный блок дискриминатора (ConvNeXt + опционально SRA) без AdaLN"""
     features: int
     num_heads: int = 4
+    use_attn: bool = True
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
@@ -14,13 +15,19 @@ class DiscBlock(nn.Module):
         
         # Local
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        x = nn.Conv(self.features, (3, 3), padding="SAME", feature_group_count=self.features, dtype=self.dtype)(x)
+        x_local = nn.Conv(self.features, (3, 3), padding="SAME", feature_group_count=self.features, dtype=self.dtype)(x)
         
-        # Global Attn
-        B, H, W, C = x.shape
-        x_flat = x.reshape((B, H * W, C))
-        attn_out = nn.SelfAttention(num_heads=self.num_heads, dtype=self.dtype)(x_flat)
-        x = x + attn_out.reshape((B, H, W, C))
+        if self.use_attn:
+            # Global Attn (SRA)
+            attn_out = SpatialReductionAttention(
+                features=self.features, 
+                num_heads=self.num_heads, 
+                reduction_ratio=2,
+                dtype=self.dtype
+            )(x_local)
+            x = x_local + attn_out
+        else:
+            x = x_local
         
         # FFN
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
@@ -37,34 +44,47 @@ class Discriminator(nn.Module):
     use_sn: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
-    depth: int = 6
-    patch_size: int = 2
-    features: int = 128
+    base_features: int = 128
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x):
         x = x.astype(self.dtype)
         
-        # 1. Patchify
+        # 1. Начальный маппинг в высоком разрешении (32x32)
         x = nn.Conv(
-            self.features, 
-            kernel_size=(self.patch_size, self.patch_size), 
-            strides=(self.patch_size, self.patch_size),
+            self.base_features, 
+            kernel_size=(3, 3), 
+            strides=(1, 1),
+            padding="SAME",
             dtype=self.dtype
         )(x)
         
-        # 2. Изотропная труба
-        for _ in range(self.depth):
-            x = DiscBlock(features=self.features, dtype=self.dtype)(x)
+        # Stage 1: 32x32 (с Attention)
+        for _ in range(2):
+            x = DiscBlock(features=self.base_features, use_attn=True, dtype=self.dtype)(x)
+            
+        # Downsample: 32x32 -> 16x16
+        x = nn.Conv(self.base_features * 2, (3, 3), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
+        
+        # Stage 2: 16x16 (только локальные текстуры ConvNeXt)
+        for _ in range(2):
+            x = DiscBlock(features=self.base_features * 2, use_attn=False, dtype=self.dtype)(x)
+            
+        # Downsample: 16x16 -> 8x8
+        x = nn.Conv(self.base_features * 4, (3, 3), strides=(2, 2), padding="SAME", dtype=self.dtype)(x)
+        
+        # Stage 3: 8x8 (только локальные текстуры ConvNeXt)
+        for _ in range(2):
+            x = DiscBlock(features=self.base_features * 4, use_attn=False, dtype=self.dtype)(x)
             
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.swish(x)
         
-        # 3. Global Pooling
+        # Global Pooling
         x = jnp.mean(x, axis=(1, 2))
         
-        # 4. Minibatch Discrimination
+        # Minibatch Discrimination
         x = MinibatchDiscrimination(
             num_kernels=self.num_kernels_mbd,
             kernel_dim=self.kernel_dim_mbd,

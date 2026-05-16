@@ -98,9 +98,9 @@ def main():
     )
     tx_d = optax.adam(learning_rate=config.lr_disc, b1=config.beta1, b2=config.beta2)
 
-    rng, init_g_rng = jax.random.split(rng)
+    rng, init_g_rng, init_noise_rng = jax.random.split(rng, 3)
     dummy_z = jnp.ones((1, config.latent_dim), dtype=jnp.float32)
-    g_params = g_model.init(init_g_rng, dummy_z)["params"]
+    g_params = g_model.init({'params': init_g_rng, 'noise': init_noise_rng}, dummy_z)["params"]
     g_state = train_state.TrainState.create(apply_fn=g_model.apply, params=g_params, tx=tx_g)
     g_state = flax.jax_utils.replicate(g_state)
 
@@ -139,20 +139,20 @@ def main():
     on_host = np.asarray(jax.device_get(dataset_replicated[0]))
 
     @jax.jit
-    def gen_batch(params, z):
-        return g_model.apply({"params": params}, z)
+    def gen_batch(params, z, noise_rng):
+        return g_model.apply({"params": params}, z, rngs={"noise": noise_rng})
 
-    def gen_batch_pad(params, z, n_take):
+    def gen_batch_pad(params, z, n_take, noise_rng):
         """Always compile-friendly GEN_BATCH_SIZE; returns host numpy of first n_take rows."""
         n = int(z.shape[0])
         if n > GEN_BATCH_SIZE:
             raise ValueError(f"z batch {n} exceeds GEN_BATCH_SIZE={GEN_BATCH_SIZE}")
         if n == GEN_BATCH_SIZE:
-            out = gen_batch(params, z)
+            out = gen_batch(params, z, noise_rng)
             return np.asarray(out[:n_take])
         pad = GEN_BATCH_SIZE - n
         z_pad = jnp.concatenate([z, jnp.zeros((pad, z.shape[1]), dtype=z.dtype)], axis=0)
-        out = gen_batch(params, z_pad)
+        out = gen_batch(params, z_pad, noise_rng)
         return np.asarray(out[:n_take])
 
     print("Starting compilation...")
@@ -233,7 +233,8 @@ def main():
 
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
         gen_start = time.time()
-        fake_test_images = gen_batch(ema_g_params_cpu, test_z)
+        rng, preview_noise_rng = jax.random.split(rng)
+        fake_test_images = gen_batch(ema_g_params_cpu, test_z, preview_noise_rng)
         fake_test_images = np.asarray(fake_test_images)[:64]
         print(f"Gen preview & device sync: {time.time() - gen_start:.2f}s")
         grid = create_image_grid(fake_test_images)
@@ -245,9 +246,11 @@ def main():
             z_eval = jax.random.normal(z_rng, (2048, config.latent_dim), dtype=jnp.float32)
 
             fake_eval = []
+            rng, eval_noise_rng = jax.random.split(rng)
             for i in range(0, 2048, GEN_BATCH_SIZE):
+                eval_noise_rng, step_noise_rng = jax.random.split(eval_noise_rng)
                 z_chunk = z_eval[i : i + GEN_BATCH_SIZE]
-                fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk))
+                fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk, step_noise_rng))
             fake_eval = jnp.concatenate(fake_eval, axis=0)
 
             kl_score = calculate_resnet_kl(real_eval, fake_eval, resnet_model, resnet_params)
@@ -256,11 +259,13 @@ def main():
 
         if epoch % config.fid_every_epochs == 0 or epoch == config.epochs:
             fake_images_fid = []
+            rng, fid_noise_rng = jax.random.split(rng)
             for i in tqdm(range(0, config.num_fid_samples, GEN_BATCH_SIZE), desc="Generating FID samples"):
                 need = min(GEN_BATCH_SIZE, config.num_fid_samples - i)
                 rng, z_rng = jax.random.split(rng)
+                fid_noise_rng, step_noise_rng = jax.random.split(fid_noise_rng)
                 z_small = jax.random.normal(z_rng, (need, config.latent_dim), dtype=jnp.float32)
-                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need))
+                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need, step_noise_rng))
             fake_images_fid = np.concatenate(fake_images_fid, axis=0)
 
             os.makedirs("/kaggle/working/fid_samples", exist_ok=True)

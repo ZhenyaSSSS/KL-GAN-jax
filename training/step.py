@@ -12,11 +12,12 @@ from config import config
 
 @partial(jax.pmap, axis_name="tpu_nodes")
 def train_step(rng, g_state, d_state, ema_g_params, real_images):
-    z = jax.random.normal(rng, (real_images.shape[0], config.latent_dim))
+    rng, z_rng, noise_rng = jax.random.split(rng, 3)
+    z = jax.random.normal(z_rng, (real_images.shape[0], config.latent_dim))
 
     def d_loss_fn(d_params):
         f_real = d_state.apply_fn({"params": d_params}, real_images)
-        fake_images = g_state.apply_fn({"params": g_state.params}, z)
+        fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
         f_fake = d_state.apply_fn({"params": d_params}, fake_images)
 
         mu_r, var_r, log_var_r = calc_stats_stable(f_real)
@@ -34,7 +35,7 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
     grads_d, (skl, div_loss, mu_r, var_r, log_var_r) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
 
     def g_loss_fn(g_params):
-        fake_images = g_state.apply_fn({"params": g_params}, z)
+        fake_images = g_state.apply_fn({"params": g_params}, z, rngs={"noise": noise_rng})
         f_fake = d_state.apply_fn({"params": d_state.params}, fake_images)
 
         loss_G = symmetric_kl_loss_with_fixed_real(mu_r, var_r, log_var_r, f_fake)

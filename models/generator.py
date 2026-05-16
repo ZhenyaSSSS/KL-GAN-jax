@@ -23,27 +23,42 @@ class Generator(nn.Module):
     features: int = 128
     mapping_dim: int = 256
     depth: int = 6
-    patch_size: int = 2
     image_size: int = 32
     dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, z):
+    def __call__(self, z, noise=None):
         w = MappingNetwork(features=self.mapping_dim, num_layers=4, dtype=jnp.float32)(z).astype(self.dtype)
-        grid_size = self.image_size // self.patch_size
-        x = self.param(
+        
+        # Обучаемая константная картинка
+        x_mean = self.param(
             "constant_input",
             nn.initializers.normal(stddev=0.02),
-            (1, grid_size, grid_size, self.features),
+            (1, self.image_size, self.image_size, self.features),
         )
+        
+        # Обучаемый std для шума
+        x_std = self.param(
+            "noise_std",
+            nn.initializers.constant(0.01),
+            (1, 1, 1, self.features),
+        )
+
         B = z.shape[0]
-        x = jnp.broadcast_to(x, (B, grid_size, grid_size, self.features)).astype(self.dtype)
+        x_mean = jnp.broadcast_to(x_mean, (B, self.image_size, self.image_size, self.features))
+        
+        if noise is None:
+            if self.has_variable("rngs", "noise"):
+                noise = jax.random.normal(self.make_rng("noise"), x_mean.shape)
+            else:
+                noise = jnp.zeros_like(x_mean)
+
+        x = x_mean + noise * jax.nn.softplus(x_std)
+        x = x.astype(self.dtype)
+
         for _ in range(self.depth):
             x = HybridDiTBlock(features=self.features, dtype=self.dtype)(x, w)
+
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        out_channels = (self.patch_size**2) * self.channels
-        x = nn.Dense(out_channels, kernel_init=nn.initializers.zeros_init(), dtype=self.dtype)(x)
-        x = x.reshape((B, grid_size, grid_size, self.patch_size, self.patch_size, self.channels))
-        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
-        x = x.reshape((B, self.image_size, self.image_size, self.channels))
+        x = nn.Dense(self.channels, kernel_init=nn.initializers.zeros_init(), dtype=self.dtype)(x)
         return nn.tanh(x)
