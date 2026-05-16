@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from models.layers import HybridDiTBlock
