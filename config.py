@@ -31,6 +31,8 @@ class Config:
 
     image_size: int = 32
     channels: int = 3
+    latent_scaling_factor: float = 2.35711
+    latent_npy_path: str = "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents/ffhq_latents_64x64x16.npy"
     use_sn: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5

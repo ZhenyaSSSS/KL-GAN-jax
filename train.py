@@ -1,6 +1,10 @@
 import os
 import time
+import threading
 from functools import partial
+
+import torch
+from diffusers import AutoencoderKL
 
 import jax
 import jax.numpy as jnp
@@ -12,15 +16,27 @@ from tqdm import tqdm
 import numpy as np
 
 from config import config
-from data.loader import load_dataset_sharded
+from data.loader import load_latents_sharded
 from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
-from metrics.eval_resnet import load_pretrained_resnet, calculate_resnet_kl
+from training.losses import calc_stats_stable, kl_divergence_stable
 
 # Fixed latent batch size for @jax.jit gen_batch (avoids XLA recompile on shape changes).
 GEN_BATCH_SIZE = 256
 LOG_EVERY_STEPS = 20
+
+
+@jax.jit
+def calculate_latent_kl(real_latents, fake_latents):
+    f_real = real_latents.reshape((real_latents.shape[0], -1))
+    f_fake = fake_latents.reshape((fake_latents.shape[0], -1))
+
+    mu_r, var_r, log_var_r = calc_stats_stable(f_real)
+    mu_f, var_f, log_var_f = calc_stats_stable(f_fake)
+    
+    kl_score = kl_divergence_stable(mu_f, log_var_f, mu_r, log_var_r, var_f)
+    return kl_score / f_real.shape[1]
 
 
 @jax.pmap
@@ -78,12 +94,35 @@ def main():
 
     rng = jax.random.PRNGKey(config.seed)
 
-    print("Loading and sharding full dataset across devices...")
-    dataset_sharded, samples_per_device = load_dataset_sharded(image_size=config.image_size)
+    print("Загрузка латентного датасета...")
+    dataset_sharded, samples_per_device = load_latents_sharded(
+        npy_path=config.latent_npy_path,
+        scaling_factor=config.latent_scaling_factor,
+    )
     num_samples = samples_per_device * num_devices
     if num_samples < config.batch_size_per_device:
         raise ValueError("Dataset smaller than per-device batch size.")
     steps_per_epoch = num_samples // config.batch_size_per_device
+
+    print("Загрузка PyTorch VAE на CPU для декодирования (JAX заберет TPU)...")
+    vae = AutoencoderKL.from_pretrained("REPA-E/e2e-sd3.5-vae").to("cpu")
+    vae.eval()
+    vae.requires_grad_(False)
+
+    def decode_latents_to_rgb(jax_latents):
+        latents_np = np.asarray(jax_latents) * config.latent_scaling_factor
+        latents_pt = torch.tensor(latents_np).permute(0, 3, 1, 2).float()
+        
+        decoded_images = []
+        with torch.no_grad():
+            for i in range(0, len(latents_pt), 8):
+                chunk = latents_pt[i:i+8]
+                img = vae.decode(chunk).sample
+                decoded_images.append(img.numpy())
+                
+        decoded_images = np.concatenate(decoded_images, axis=0)
+        decoded_images = np.transpose(decoded_images, (0, 2, 3, 1))
+        return decoded_images
 
     dt = config.compute_dtype
     g_model = Generator(channels=config.channels, image_size=config.image_size, dtype=dt)
@@ -136,17 +175,6 @@ def main():
     rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (GEN_BATCH_SIZE, config.latent_dim), dtype=jnp.float32)
 
-    try:
-        resnet_model = load_pretrained_resnet()
-        rng, resnet_rng = jax.random.split(rng)
-        resnet_params = resnet_model.init(resnet_rng, jnp.ones((1, 32, 32, 3)))
-        print("Successfully loaded pre-trained ResNet18 for KL divergence.")
-    except Exception as e:
-        print(f"Failed to load ResNet18: {e}")
-        resnet_model = None
-        resnet_params = None
-
-    # We pull a small chunk of real images back to host for ResNet eval
     on_host = np.asarray(jax.device_get(dataset_sharded[0]))
 
     # Compile the ppermute logic to rotate shards across TPU cores
@@ -250,44 +278,56 @@ def main():
         )
 
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
-        gen_start = time.time()
         rng, preview_noise_rng = jax.random.split(rng)
-        fake_test_images = gen_batch(ema_g_params_cpu, test_z, preview_noise_rng)
-        fake_test_images = np.asarray(fake_test_images)[:64]
-        print(f"Gen preview & device sync: {time.time() - gen_start:.2f}s")
-        grid = create_image_grid(fake_test_images)
-        wandb.log({"Generated Images": wandb.Image(grid)}, step=global_step)
+        fake_test_latents = gen_batch(ema_g_params_cpu, test_z[:16], preview_noise_rng) 
+        
+        # --- АСИНХРОННАЯ ОТПРАВКА В W&B ---
+        def decode_and_log(latents, step):
+            rgb_images = decode_latents_to_rgb(latents)
+            grid = create_image_grid(rgb_images, grid_size=(4, 4))
+            wandb.log({"Generated Images (512x512)": wandb.Image(grid)}, step=step)
 
-        if epoch % config.eval_every_epochs == 0 and resnet_model is not None:
-            real_eval = on_host[:2048]
+        latents_np = np.asarray(fake_test_latents).copy()
+        t = threading.Thread(target=decode_and_log, args=(latents_np, global_step))
+        t.start()
+
+        # --- ЭВАЛЮАЦИЯ (Latent KL) ---
+        if epoch % config.eval_every_epochs == 0:
+            real_eval = on_host[:1024] 
             rng, z_rng = jax.random.split(rng)
-            z_eval = jax.random.normal(z_rng, (2048, config.latent_dim), dtype=jnp.float32)
+            z_eval = jax.random.normal(z_rng, (1024, config.latent_dim), dtype=jnp.float32)
 
             fake_eval = []
             rng, eval_noise_rng = jax.random.split(rng)
-            for i in range(0, 2048, GEN_BATCH_SIZE):
+            for i in range(0, 1024, GEN_BATCH_SIZE):
                 eval_noise_rng, step_noise_rng = jax.random.split(eval_noise_rng)
                 z_chunk = z_eval[i : i + GEN_BATCH_SIZE]
                 fake_eval.append(gen_batch(ema_g_params_cpu, z_chunk, step_noise_rng))
             fake_eval = jnp.concatenate(fake_eval, axis=0)
 
-            kl_score = calculate_resnet_kl(real_eval, fake_eval, resnet_model, resnet_params)
-            wandb.log({"Val/ResNet18_KL": float(kl_score)}, step=global_step)
-            print(f"Epoch {epoch} | ResNet18_KL: {float(kl_score):.4f}")
+            kl_score = calculate_latent_kl(real_eval, fake_eval)
+            wandb.log({"Val/Latent_KL": float(kl_score)}, step=global_step)
+            print(f"Epoch {epoch} | Latent KL: {float(kl_score):.5f}")
 
         if epoch % config.fid_every_epochs == 0 or epoch == config.epochs:
-            fake_images_fid = []
+            fake_latents_fid = []
             rng, fid_noise_rng = jax.random.split(rng)
-            for i in tqdm(range(0, config.num_fid_samples, GEN_BATCH_SIZE), desc="Generating FID samples"):
+            for i in tqdm(range(0, config.num_fid_samples, GEN_BATCH_SIZE), desc="Gen FID Latents"):
                 need = min(GEN_BATCH_SIZE, config.num_fid_samples - i)
                 rng, z_rng = jax.random.split(rng)
                 fid_noise_rng, step_noise_rng = jax.random.split(fid_noise_rng)
                 z_small = jax.random.normal(z_rng, (need, config.latent_dim), dtype=jnp.float32)
-                fake_images_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need, step_noise_rng))
-            fake_images_fid = np.concatenate(fake_images_fid, axis=0)
+                fake_latents_fid.append(gen_batch_pad(ema_g_params_cpu, z_small, need, step_noise_rng))
+                
+            fake_latents_fid = np.concatenate(fake_latents_fid, axis=0)
+            
+            # Демасштабируем обратно
+            fake_latents_fid = fake_latents_fid * config.latent_scaling_factor
 
             os.makedirs("/kaggle/working/fid_samples", exist_ok=True)
-            np.save(f"/kaggle/working/fid_samples/fake_images_epoch_{epoch}.npy", fake_images_fid)
+            np.save(f"/kaggle/working/fid_samples/fake_latents_epoch_{epoch}.npy", fake_latents_fid)
+            print(f"Saved 10k LATENTS to disk. Decode them later on a GPU!")
+
             try:
                 from flax.training import checkpoints
                 checkpoints.save_checkpoint(
@@ -300,7 +340,6 @@ def main():
                 print(f"Saved checkpoint and FID samples to /kaggle/working/ for epoch {epoch}")
             except ImportError:
                 import pickle
-
                 os.makedirs("/kaggle/working/checkpoints", exist_ok=True)
                 with open(f"/kaggle/working/checkpoints/g_ema_{epoch}.pkl", "wb") as f:
                     pickle.dump(ema_g_params_cpu, f)

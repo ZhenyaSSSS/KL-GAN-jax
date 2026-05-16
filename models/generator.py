@@ -62,4 +62,4 @@ class Generator(nn.Module):
 
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.Dense(self.channels, kernel_init=nn.initializers.zeros_init(), dtype=self.dtype)(x)
-        return nn.tanh(x)
+        return x
