@@ -138,6 +138,13 @@ def main():
     # We pull a small chunk of real images back to host for ResNet eval
     on_host = np.asarray(jax.device_get(dataset_sharded[0]))
 
+    # Compile the ppermute logic to rotate shards across TPU cores
+    perm = [(i, (i + 1) % num_devices) for i in range(num_devices)]
+    
+    @partial(jax.pmap, axis_name="tpu_nodes")
+    def rotate_shards(dataset_shard):
+        return jax.lax.ppermute(dataset_shard, axis_name="tpu_nodes", perm=perm)
+
     @jax.jit
     def gen_batch(params, z, noise_rng):
         return g_model.apply({"params": params}, z, rngs={"noise": noise_rng})
@@ -287,6 +294,9 @@ def main():
                 with open(f"/kaggle/working/checkpoints/g_ema_{epoch}.pkl", "wb") as f:
                     pickle.dump(ema_g_params_cpu, f)
                 print(f"Saved weights (pickle) and FID samples to /kaggle/working/ for epoch {epoch}")
+
+        # Rotate shards across TPU cores over the interconnect so every D sees the whole dataset over 8 epochs
+        dataset_sharded = rotate_shards(dataset_sharded)
 
     wandb.finish()
     print("Training complete.")

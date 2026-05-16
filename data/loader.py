@@ -97,7 +97,7 @@ def load_dataset_sharded(data_dir: str = "./data/celeba", image_size: int = 32):
     """Shards the full dataset across local devices to save HBM and avoid host-device transfers."""
     data_array = get_celeba_array(data_dir, image_size)
     
-    # Обязательно перемешиваем глобально один раз, чтобы каждый TPU получил случайный срез лиц
+    # Глобальный шафл перед первой нарезкой
     np.random.shuffle(data_array)
     
     num_samples = int(data_array.shape[0])
