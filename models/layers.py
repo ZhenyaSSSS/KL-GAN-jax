@@ -30,8 +30,38 @@ class GRN(nn.Module):
         beta = self.param("beta", nn.initializers.zeros_init(), (1, 1, 1, self.dim), self.dtype)
         return x * (1.0 + gamma * nx) + beta
 
+
+def apply_rotary_emb(x, cos, sin):
+    xf = x.astype(jnp.float32)
+    d = xf.shape[-1] // 2
+    x1, x2 = xf[..., :d], xf[..., d:]
+    x_rot = jnp.concatenate([-x2, x1], axis=-1)
+    c = cos.astype(jnp.float32)
+    s = sin.astype(jnp.float32)
+    out = (xf * c) + (x_rot * s)
+    return out.astype(x.dtype)
+
+
+def get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1):
+    if head_dim % 4 != 0:
+        raise ValueError(f"head_dim {head_dim} must be divisible by 4 for 2D RoPE")
+    half_dim = head_dim // 2
+    inv_freq = 1.0 / (10000 ** (jnp.arange(0, half_dim, 2, dtype=jnp.float32) / half_dim))
+    pos_y = jnp.arange(0, H * reduction_ratio, reduction_ratio, dtype=jnp.float32)
+    pos_x = jnp.arange(0, W * reduction_ratio, reduction_ratio, dtype=jnp.float32)
+    freqs_y = jnp.einsum("i,j->ij", pos_y, inv_freq)
+    freqs_x = jnp.einsum("i,j->ij", pos_x, inv_freq)
+    freqs_y = jnp.broadcast_to(freqs_y[:, None, :], (pos_y.shape[0], pos_x.shape[0], freqs_y.shape[-1]))
+    freqs_x = jnp.broadcast_to(freqs_x[None, :, :], (pos_y.shape[0], pos_x.shape[0], freqs_x.shape[-1]))
+    freqs = jnp.concatenate([freqs_y, freqs_x], axis=-1)
+    emb = jnp.concatenate([freqs, freqs], axis=-1)
+    cos = jnp.cos(emb)
+    sin = jnp.sin(emb)
+    return cos[None, ..., None, :], sin[None, ..., None, :]
+
+
 class SpatialReductionAttention(nn.Module):
-    """Эффективный Attention: Q в полном разрешении, K и V в сжатом."""
+    """Эффективный Attention: Q в полном разрешении, K и V в сжатом; 2D RoPE на Q и K."""
     features: int
     num_heads: int = 4
     reduction_ratio: int = 2
@@ -42,31 +72,46 @@ class SpatialReductionAttention(nn.Module):
         B, H, W, C = x.shape
         head_dim = C // self.num_heads
         n_tokens_q = H * W
-        
+
+        cos_q, sin_q = get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1)
+
         x_flat = x.reshape((B, n_tokens_q, C))
         q = nn.Dense(C, use_bias=False, dtype=self.dtype)(x_flat)
-        
+        q = q.reshape((B, H, W, self.num_heads, head_dim))
+        q = apply_rotary_emb(q, cos_q, sin_q)
+        q = q.reshape((B, n_tokens_q, self.num_heads, head_dim))
+
         if self.reduction_ratio > 1:
             x_reduced = nn.avg_pool(
-                x, 
-                window_shape=(self.reduction_ratio, self.reduction_ratio), 
-                strides=(self.reduction_ratio, self.reduction_ratio)
+                x,
+                window_shape=(self.reduction_ratio, self.reduction_ratio),
+                strides=(self.reduction_ratio, self.reduction_ratio),
             )
+            Hr = x_reduced.shape[1]
+            Wr = x_reduced.shape[2]
+            cos_k, sin_k = get_2d_rope_sin_cos(Hr, Wr, head_dim, reduction_ratio=self.reduction_ratio)
         else:
             x_reduced = x
-            
-        n_tokens_kv = x_reduced.shape[1] * x_reduced.shape[2]
+            Hr, Wr = H, W
+            cos_k, sin_k = cos_q, sin_q
+
+        n_tokens_kv = Hr * Wr
         x_reduced_flat = x_reduced.reshape((B, n_tokens_kv, C))
-        
+
         kv = nn.Dense(C * 2, use_bias=False, dtype=self.dtype)(x_reduced_flat)
         k, v = jnp.split(kv, 2, axis=-1)
 
-        q = q.reshape((B, n_tokens_q, self.num_heads, head_dim))
+        k = k.reshape((B, Hr, Wr, self.num_heads, head_dim))
+        k = apply_rotary_emb(k, cos_k, sin_k)
         k = k.reshape((B, n_tokens_kv, self.num_heads, head_dim))
         v = v.reshape((B, n_tokens_kv, self.num_heads, head_dim))
 
-        q = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(q.reshape((B, n_tokens_q, C))).reshape((B, n_tokens_q, self.num_heads, head_dim))
-        k = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(k.reshape((B, n_tokens_kv, C))).reshape((B, n_tokens_kv, self.num_heads, head_dim))
+        q = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(q.reshape((B, n_tokens_q, C))).reshape(
+            (B, n_tokens_q, self.num_heads, head_dim)
+        )
+        k = nn.GroupNorm(num_groups=self.num_heads, use_scale=False)(k.reshape((B, n_tokens_kv, C))).reshape(
+            (B, n_tokens_kv, self.num_heads, head_dim)
+        )
 
         attn = jnp.einsum("bnhd,bmhd->bhnm", q, k) * (head_dim ** -0.5)
         attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(self.dtype)
