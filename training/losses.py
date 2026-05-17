@@ -73,3 +73,85 @@ def zero_centered_repulsion_loss(mu, all_mu, log_var, all_log_var, temperature=0
     mean_others_exp = others_exp_sum / num_others
     loss = t * jnp.log(mean_others_exp)
     return jnp.where(num_devices > 1, loss, jnp.asarray(0.0, dtype=loss.dtype))
+
+# --- Manifold-GAN Losses ---
+
+def compute_cost_matrix(X, Y):
+    dist = jnp.sum(X**2, axis=1, keepdims=True) + jnp.sum(Y**2, axis=1) - 2 * jnp.dot(X, Y.T)
+    return jnp.maximum(dist, 0.0)
+
+def sinkhorn_ot_primal(C, epsilon=0.05, max_iter=15):
+    import jax
+    n, m = C.shape
+    log_mu = jnp.full((n,), -jnp.log(n))
+    log_nu = jnp.full((m,), -jnp.log(m))
+    log_K = -C / epsilon
+
+    def scan_body(carry, _):
+        f, g = carry
+        f = log_mu - jax.nn.logsumexp(log_K + g[None, :], axis=1)
+        g = log_nu - jax.nn.logsumexp(log_K.T + f[None, :], axis=1)
+        return (f, g), None
+
+    f_init = jnp.zeros((n,))
+    g_init = jnp.zeros((m,))
+    (f_final, g_final), _ = jax.lax.scan(scan_body, (f_init, g_init), None, length=max_iter)
+
+    log_P = f_final[:, None] + log_K + g_final[None, :]
+    P = jnp.exp(log_P)
+    
+    linear_cost = jnp.sum(P * C)
+    kl_cost = jnp.sum(P * jnp.log(jnp.clip(P, a_min=1e-30))) + jnp.log(n * m)
+    return linear_cost + epsilon * kl_cost
+
+def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
+    C_xy = compute_cost_matrix(X, Y)
+    C_xx = compute_cost_matrix(X, X)
+    C_yy = compute_cost_matrix(Y, Y)
+    
+    ot_xy = sinkhorn_ot_primal(C_xy, epsilon, max_iter)
+    ot_xx = sinkhorn_ot_primal(C_xx, epsilon, max_iter)
+    ot_yy = sinkhorn_ot_primal(C_yy, epsilon, max_iter)
+    
+    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
+
+def contrastive_info_nce_loss(proj, proj_aug, temperature=0.2):
+    import jax
+    proj = proj / jnp.linalg.norm(proj, axis=1, keepdims=True)
+    proj_aug = proj_aug / jnp.linalg.norm(proj_aug, axis=1, keepdims=True)
+    
+    sim_matrix = jnp.dot(proj, proj_aug.T) / temperature
+    labels = jnp.arange(proj.shape[0])
+    
+    log_probs = jax.nn.log_softmax(sim_matrix, axis=-1)
+    loss = -jnp.mean(log_probs[jnp.arange(proj.shape[0]), labels])
+    return loss
+
+def tpu_feature_decorrelation_loss(local_proj):
+    import jax
+    all_projs = jax.lax.all_gather(local_proj, axis_name="tpu_nodes")
+    num_tpus, B, D = all_projs.shape
+    
+    if num_tpus == 1:
+        return jnp.asarray(0.0)
+
+    mean_proj = jnp.mean(all_projs, axis=1, keepdims=True)
+    std_proj = jnp.std(all_projs, axis=1, keepdims=True) + 1e-6
+    z_all = (all_projs - mean_proj) / std_proj
+    
+    z_all_transposed = jnp.transpose(z_all, (0, 2, 1)) # [num_tpus, D, B]
+    z_flat = z_all_transposed.reshape(num_tpus * D, B)
+    cov_matrix = jnp.dot(z_flat, z_flat.T) / (B - 1)
+    
+    import jax.scipy.linalg
+    mask = 1.0 - jax.scipy.linalg.block_diag(*[jnp.ones((D, D)) for _ in range(num_tpus)])
+    
+    off_diag_cov = cov_matrix * mask
+    loss = jnp.sum(off_diag_cov**2) / (num_tpus * (num_tpus - 1) * D * D)
+    
+    return loss
+
+def coverage_loss(proj):
+    target_var = 0.33
+    variances = jnp.var(proj, axis=0)
+    return jnp.mean((variances - target_var)**2)

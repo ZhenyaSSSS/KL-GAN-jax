@@ -47,6 +47,8 @@ class Discriminator(nn.Module):
     kernel_dim_mbd: int = 5
     base_features: int = 128
     dtype: jnp.dtype = jnp.bfloat16
+    loss_type: str = "kl"
+    manifold_proj_dim: int = 16
 
     @nn.compact
     def __call__(self, x):
@@ -92,5 +94,10 @@ class Discriminator(nn.Module):
             dtype=self.dtype,
         )(x)
 
-        f = nn.Dense(256, dtype=self.dtype)(x)
+        if self.loss_type == "manifold":
+            f = nn.Dense(self.manifold_proj_dim, dtype=self.dtype)(x)
+            f = nn.tanh(f)
+        else:
+            f = nn.Dense(256, dtype=self.dtype)(x)
+            
         return f.astype(jnp.float32)

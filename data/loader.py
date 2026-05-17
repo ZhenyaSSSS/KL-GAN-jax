@@ -3,8 +3,10 @@ import jax
 import numpy as np
 
 def load_latents_sharded(
-    npy_path="/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents/ffhq_latents_64x64x16.npy",
-    scaling_factor=1.0,
+    npy_path="/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents-256/ffhq_latents_32x32x16.npy",
+    latent_mean=None,
+    latent_std=None,
+    clip_value=10.0,
 ):
     print(f"Загрузка латентов из {npy_path} в ОЗУ...")
     
@@ -14,9 +16,16 @@ def load_latents_sharded(
     data_array = np.load(npy_path).astype(np.float32)
     print(f"Исходная форма: {data_array.shape}, Память: {data_array.nbytes / (1024**3):.2f} GB")
     
-    # 1. Нормализуем дисперсию к ~1.0
-    print(f"Применяем scaling_factor: {scaling_factor}")
-    data_array = data_array * (1.0 / scaling_factor)
+    # 1. Нормализуем дисперсию и среднее поканально
+    if latent_mean is not None and latent_std is not None:
+        print("Применяем поканальную нормализацию (mean, std)...")
+        mean_arr = np.array(latent_mean, dtype=np.float32).reshape(1, 1, 1, -1)
+        std_arr = np.array(latent_std, dtype=np.float32).reshape(1, 1, 1, -1)
+        data_array = (data_array - mean_arr) / std_arr
+        
+    if clip_value is not None:
+        print(f"Обрезаем значения (clip) до диапазона [{-clip_value}, {clip_value}]")
+        data_array = np.clip(data_array, -clip_value, clip_value)
     
     # 2. Перемешиваем
     np.random.shuffle(data_array)

@@ -19,7 +19,7 @@ def _parse_dtype(name: str):
 class Config:
     seed: int = 42
     
-    batch_size_per_device: int = 32
+    batch_size_per_device: int = 256
     epochs: int = 500
     lr_gen: float = 0.0001
     lr_disc: float = 0.00005
@@ -29,10 +29,31 @@ class Config:
     lambda_div: float = 0.5
     diversity_temperature: float = 0.5
 
+    loss_type: str = "kl"
+    manifold_proj_dim: int = 16
+    lambda_contrastive: float = 1.0
+    lambda_decorr: float = 1.0
+    lambda_cov: float = 1.0
+    sinkhorn_epsilon: float = 0.05
+    sinkhorn_max_iter: int = 15
+
     image_size: int = 32
-    channels: int = 3
-    latent_scaling_factor: float = 2.35711
-    latent_npy_path: str = "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents/ffhq_latents_64x64x16.npy"
+    channels: int = 16
+    
+    latent_mean: tuple = (
+        0.022520065307617188, 0.028891298919916153, -0.032047729939222336, -0.02299668826162815,
+        0.07542382180690765, 0.005438343621790409, 0.018080536276102066, -0.009380939416587353,
+        -0.059318918734788895, -0.005332487169653177, 0.0028201835229992867, 0.001997536513954401,
+        -0.059100743383169174, -0.014550937339663506, -0.04712633043527603, 0.020210357382893562
+    )
+    latent_std: tuple = (
+        2.3372809886932373, 2.3508591651916504, 2.346092700958252, 2.3590447902679443,
+        2.3411736488342285, 2.3550071716308594, 2.368407964706421, 2.3568196296691895,
+        2.332087278366089, 2.373119592666626, 2.3301920890808105, 2.348010778427124,
+        2.3711912631988525, 2.364023447036743, 2.3427982330322266, 2.3572182655334473
+    )
+    latent_clip_value: float = 10.0
+    latent_npy_path: str = "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents-256/ffhq_latents_32x32x16.npy"
     use_sn: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5

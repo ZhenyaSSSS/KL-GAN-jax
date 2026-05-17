@@ -3,21 +3,28 @@
 seed: 42
 
 # Training params
-batch_size_per_device: 32
+batch_size_per_device: 256
 epochs: 500
 lr_gen: 0.0002
 lr_disc: 0.0002
 beta1: 0.5
 beta2: 0.999
 latent_dim: 128
+loss_type: "kl"
+manifold_proj_dim: 16
+lambda_contrastive: 1.0
+lambda_decorr: 1.0
+lambda_cov: 1.0
+sinkhorn_epsilon: 0.05
+sinkhorn_max_iter: 15
 lambda_div: 0.5
 diversity_temperature: 0.5
 
 # Model params
-image_size: 64
+image_size: 32
 channels: 16
-latent_scaling_factor: 2.35711
-latent_npy_path: "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents/ffhq_latents_64x64x16.npy"
+latent_clip_value: 10.0
+latent_npy_path: "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents-256/ffhq_latents_32x32x16.npy"
 
 use_sn: false  # legacy; discriminator ignores this flag
 num_kernels_mbd: 100

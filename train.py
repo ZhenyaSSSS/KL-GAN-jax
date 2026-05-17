@@ -97,7 +97,9 @@ def main():
     print("Загрузка латентного датасета...")
     dataset_sharded, samples_per_device = load_latents_sharded(
         npy_path=config.latent_npy_path,
-        scaling_factor=config.latent_scaling_factor,
+        latent_mean=config.latent_mean,
+        latent_std=config.latent_std,
+        clip_value=config.latent_clip_value,
     )
     num_samples = samples_per_device * num_devices
     if num_samples < config.batch_size_per_device:
@@ -110,7 +112,14 @@ def main():
     vae.requires_grad_(False)
 
     def decode_latents_to_rgb(jax_latents):
-        latents_np = np.asarray(jax_latents) * config.latent_scaling_factor
+        latents_np = np.asarray(jax_latents)
+        if config.latent_clip_value is not None:
+            latents_np = np.clip(latents_np, -config.latent_clip_value, config.latent_clip_value)
+            
+        mean_arr = np.array(config.latent_mean, dtype=np.float32).reshape(1, 1, 1, -1)
+        std_arr = np.array(config.latent_std, dtype=np.float32).reshape(1, 1, 1, -1)
+        latents_np = latents_np * std_arr + mean_arr
+        
         latents_pt = torch.tensor(latents_np).permute(0, 3, 1, 2).float()
         
         decoded_images = []
@@ -131,6 +140,8 @@ def main():
         num_kernels_mbd=config.num_kernels_mbd,
         kernel_dim_mbd=config.kernel_dim_mbd,
         dtype=dt,
+        loss_type=config.loss_type,
+        manifold_proj_dim=config.manifold_proj_dim,
     )
 
     tx_g = optax.chain(
@@ -231,13 +242,23 @@ def main():
 
                 loss_g_val = float(jnp.mean(metrics["loss_G"]))
                 loss_d_val = float(jnp.mean(metrics["loss_D"]))
-                skl_val = float(jnp.mean(metrics["SKL"]))
-                div_val = float(jnp.mean(metrics["Div_Loss"]))
+                
+                if config.loss_type == "manifold":
+                    sinkhorn_val = float(jnp.mean(metrics.get("Sinkhorn", 0.0)))
+                    contrastive_val = float(jnp.mean(metrics.get("Contrastive", 0.0)))
+                    decorr_val = float(jnp.mean(metrics.get("Decorr", 0.0)))
+                    cov_val = float(jnp.mean(metrics.get("Coverage", 0.0)))
+                    
+                    epoch_skl += sinkhorn_val # Reuse epoch_skl for sinkhorn
+                    epoch_div += decorr_val   # Reuse epoch_div for decorr
+                else:
+                    skl_val = float(jnp.mean(metrics.get("SKL", 0.0)))
+                    div_val = float(jnp.mean(metrics.get("Div_Loss", 0.0)))
+                    epoch_skl += skl_val
+                    epoch_div += div_val
 
                 epoch_loss_g += loss_g_val
                 epoch_loss_d += loss_d_val
-                epoch_skl += skl_val
-                epoch_div += div_val
 
                 step_time = time.time() - step_start
                 global_step += 1
@@ -251,31 +272,50 @@ def main():
                             mem_gb = dev.memory_stats().get("bytes_in_use", 0) / (1024**3)
                     except Exception:
                         pass
-                    wandb.log(
-                        {
-                            "Step/Loss_G": loss_g_val,
-                            "Step/Loss_D": loss_d_val,
+                        
+                    log_dict = {
+                        "Step/Loss_G": loss_g_val,
+                        "Step/Loss_D": loss_d_val,
+                        "Perf/Step_Time_sec": step_time,
+                        "Perf/Images_Per_Sec": imgs_per_step / max(step_time, 1e-9),
+                        "Perf/Memory_Used_GB": mem_gb,
+                    }
+                    
+                    if config.loss_type == "manifold":
+                        log_dict.update({
+                            "Step/Sinkhorn": sinkhorn_val,
+                            "Step/Contrastive": contrastive_val,
+                            "Step/Decorr": decorr_val,
+                            "Step/Coverage": cov_val,
+                        })
+                    else:
+                        log_dict.update({
                             "Step/SKL": skl_val,
                             "Step/Div": div_val,
-                            "Perf/Step_Time_sec": step_time,
-                            "Perf/Images_Per_Sec": imgs_per_step / max(step_time, 1e-9),
-                            "Perf/Memory_Used_GB": mem_gb,
-                        },
-                        step=global_step,
-                    )
+                        })
+                        
+                    wandb.log(log_dict, step=global_step)
 
                 pbar.set_postfix(Loss_D=f"{loss_d_val:.3f}", Loss_G=f"{loss_g_val:.3f}")
                 pbar.update(1)
 
-        wandb.log(
-            {
-                "Epoch/Loss_G": epoch_loss_g / steps_per_epoch,
-                "Epoch/Loss_D": epoch_loss_d / steps_per_epoch,
+        epoch_log_dict = {
+            "Epoch/Loss_G": epoch_loss_g / steps_per_epoch,
+            "Epoch/Loss_D": epoch_loss_d / steps_per_epoch,
+        }
+        
+        if config.loss_type == "manifold":
+            epoch_log_dict.update({
+                "Epoch/Sinkhorn": epoch_skl / steps_per_epoch,
+                "Epoch/Decorr": epoch_div / steps_per_epoch,
+            })
+        else:
+            epoch_log_dict.update({
                 "Epoch/SKL": epoch_skl / steps_per_epoch,
                 "Epoch/Diversity": epoch_div / steps_per_epoch,
-            },
-            step=global_step,
-        )
+            })
+            
+        wandb.log(epoch_log_dict, step=global_step)
 
         ema_g_params_cpu = jax.tree_util.tree_map(lambda x: x[0], ema_g_params)
         rng, preview_noise_rng = jax.random.split(rng)
@@ -322,7 +362,11 @@ def main():
             fake_latents_fid = np.concatenate(fake_latents_fid, axis=0)
             
             # Демасштабируем обратно
-            fake_latents_fid = fake_latents_fid * config.latent_scaling_factor
+            if config.latent_clip_value is not None:
+                fake_latents_fid = np.clip(fake_latents_fid, -config.latent_clip_value, config.latent_clip_value)
+            mean_arr = np.array(config.latent_mean, dtype=np.float32).reshape(1, 1, 1, -1)
+            std_arr = np.array(config.latent_std, dtype=np.float32).reshape(1, 1, 1, -1)
+            fake_latents_fid = fake_latents_fid * std_arr + mean_arr
 
             os.makedirs("/kaggle/working/fid_samples", exist_ok=True)
             np.save(f"/kaggle/working/fid_samples/fake_latents_epoch_{epoch}.npy", fake_latents_fid)
