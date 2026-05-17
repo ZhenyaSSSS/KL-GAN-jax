@@ -10,7 +10,7 @@ A highly optimized Latent Generative Adversarial Network implemented in JAX/Flax
 - **Two GAN Variations:** 
   - **Manifold (Default):** Utilizes Sinkhorn Optimal Transport divergence, Contrastive InfoNCE loss, and coverage losses. Crucially, the Manifold projection naturally drives the Discriminator to act as an implicit clustering mechanism, grouping similar latents and pushing dissimilar ones apart in the projected space.
   - **KL (Legacy):** Minimizes symmetric Kullback-Leibler divergence with Zero-Centered Repulsion loss for mode diversity.
-- **Advanced Architecture:** Employs a customized Hybrid DiT (Diffusion Transformer) with Squeeze-Excitation / AdaLN-Zero for the Generator, and a highly efficient ConvNeXt-style Discriminator with Spatial Reduction Attention (SRA) and Minibatch Discrimination.
+- **Advanced Architecture:** Employs a customized Hybrid DiT (Diffusion Transformer) with GRN (Global Response Normalization) / AdaLN-Zero for the Generator, and a highly efficient ConvNeXt-style Discriminator with Spatial Reduction Attention (SRA) and Minibatch Discrimination.
 - **Asynchronous W&B Logging:** Decodes generated latents back to RGB via PyTorch on CPU in a background thread. This allows the TPU to instantly proceed to the next epoch without idling.
 
 ## Installation
