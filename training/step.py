@@ -13,20 +13,42 @@ from training.losses import (
 )
 from config import config
 
-def apply_simple_augmentation(images, rng):
-    """SOTA-like augmentation for latents (Noise + Spatial Flip)."""
-    rng1, rng2 = jax.random.split(rng, 2)
+def augment_single(img, rng):
+    rng_noise, rng_flip, rng_crop, rng_cutout = jax.random.split(rng, 4)
     
     # 1. Gaussian Noise (0.05 std)
-    noise = jax.random.normal(rng1, images.shape) * 0.05
-    x = images + noise
+    img = img + jax.random.normal(rng_noise, img.shape) * 0.05
     
-    # 2. Random Horizontal Flip (safe for spatial VAE latents)
-    flip_mask = jax.random.bernoulli(rng2, 0.5, (images.shape[0], 1, 1, 1))
-    x_flipped = jnp.flip(x, axis=2)
-    x = jnp.where(flip_mask, x_flipped, x)
+    # 2. Random Horizontal Flip
+    img = jax.lax.cond(
+        jax.random.bernoulli(rng_flip, 0.5),
+        lambda x: jnp.flip(x, axis=1),
+        lambda x: x,
+        img
+    )
     
-    return x
+    # 3. Random Translation (Pad & Crop)
+    # 2 pixels in 32x32 latent space = 16 pixels in 256x256 image space
+    pad = 2
+    img_pad = jnp.pad(img, ((pad, pad), (pad, pad), (0, 0)), mode='edge')
+    sy = jax.random.randint(rng_crop, (), 0, 2 * pad + 1)
+    sx = jax.random.randint(rng_crop, (), 0, 2 * pad + 1)
+    img = jax.lax.dynamic_slice(img_pad, (sy, sx, 0), img.shape)
+    
+    # 4. Cutout (Random Erasing 6x6 patch)
+    hole_size = 6
+    cy = jax.random.randint(rng_cutout, (), 0, img.shape[0] - hole_size)
+    cx = jax.random.randint(rng_cutout, (), 0, img.shape[1] - hole_size)
+    mask = jnp.ones_like(img)
+    mask = jax.lax.dynamic_update_slice(mask, jnp.zeros((hole_size, hole_size, img.shape[2])), (cy, cx, 0))
+    img = img * mask
+    
+    return img
+
+def apply_simple_augmentation(images, rng):
+    """SOTA-like augmentation for latents (Noise + Spatial Flip + Translate + Cutout)."""
+    rngs = jax.random.split(rng, images.shape[0])
+    return jax.vmap(augment_single)(images, rngs)
 
 @partial(jax.pmap, axis_name="tpu_nodes")
 def train_step(rng, g_state, d_state, ema_g_params, real_images):
