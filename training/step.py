@@ -110,11 +110,4 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
     new_ema_g_params = jax.tree_util.tree_map(update_ema, ema_g_params, new_g_state.params)
 
-    metrics = {
-        "loss_G": loss_G,
-        "loss_D": -skl + (config.lambda_div * div_loss),
-        "SKL": skl,
-        "Div_Loss": div_loss,
-    }
-
     return new_g_state, new_d_state, new_ema_g_params, metrics
