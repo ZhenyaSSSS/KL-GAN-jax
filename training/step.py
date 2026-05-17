@@ -118,8 +118,12 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
             
             # DCL Loss считается между двумя РАЗНЫМИ аугментациями одной картинки
             loss_contrastive = contrastive_info_nce_loss(proj_real_aug1, proj_real_aug2)
-            
-            loss_decorr = tpu_feature_decorrelation_loss(proj_real_clean)
+
+            if config.lambda_decorr != 0.0:
+                loss_decorr = tpu_feature_decorrelation_loss(proj_real_clean)
+            else:
+                loss_decorr = jnp.asarray(0.0, dtype=loss_sinkhorn.dtype)
+
             loss_cov = coverage_loss(proj_real_clean)
             
             loss_D = (loss_sinkhorn + 
@@ -143,11 +147,12 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
         metrics = {
             "loss_G": loss_G,
             "loss_D": loss_sinkhorn + config.lambda_contrastive * loss_contrastive + config.lambda_decorr * loss_decorr + config.lambda_cov * loss_cov,
-            "Sinkhorn": -loss_sinkhorn, # Log actual positive divergence
+            "Sinkhorn": -loss_sinkhorn,
             "Contrastive": loss_contrastive,
-            "Decorr": loss_decorr,
             "Coverage": loss_cov,
         }
+        if config.lambda_decorr != 0.0:
+            metrics["Decorr"] = loss_decorr
 
     else:
         def d_loss_fn(d_params):

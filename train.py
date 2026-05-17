@@ -255,11 +255,14 @@ def main():
                 if config.loss_type == "manifold":
                     sinkhorn_val = float(jnp.mean(metrics.get("Sinkhorn", 0.0)))
                     contrastive_val = float(jnp.mean(metrics.get("Contrastive", 0.0)))
-                    decorr_val = float(jnp.mean(metrics.get("Decorr", 0.0)))
                     cov_val = float(jnp.mean(metrics.get("Coverage", 0.0)))
+                    if config.lambda_decorr != 0.0:
+                        decorr_val = float(jnp.mean(metrics["Decorr"]))
+                        epoch_div += decorr_val
+                    else:
+                        decorr_val = None
                     
-                    epoch_skl += sinkhorn_val # Reuse epoch_skl for sinkhorn
-                    epoch_div += decorr_val   # Reuse epoch_div for decorr
+                    epoch_skl += sinkhorn_val
                 else:
                     skl_val = float(jnp.mean(metrics.get("SKL", 0.0)))
                     div_val = float(jnp.mean(metrics.get("Div_Loss", 0.0)))
@@ -291,12 +294,14 @@ def main():
                     }
                     
                     if config.loss_type == "manifold":
-                        log_dict.update({
+                        m = {
                             "Step/Sinkhorn": sinkhorn_val,
                             "Step/Contrastive": contrastive_val,
-                            "Step/Decorr": decorr_val,
                             "Step/Coverage": cov_val,
-                        })
+                        }
+                        if decorr_val is not None:
+                            m["Step/Decorr"] = decorr_val
+                        log_dict.update(m)
                     else:
                         log_dict.update({
                             "Step/SKL": skl_val,
@@ -316,8 +321,9 @@ def main():
         if config.loss_type == "manifold":
             epoch_log_dict.update({
                 "Epoch/Sinkhorn": epoch_skl / steps_per_epoch,
-                "Epoch/Decorr": epoch_div / steps_per_epoch,
             })
+            if config.lambda_decorr != 0.0:
+                epoch_log_dict["Epoch/Decorr"] = epoch_div / steps_per_epoch
         else:
             epoch_log_dict.update({
                 "Epoch/SKL": epoch_skl / steps_per_epoch,
