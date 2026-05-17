@@ -1,6 +1,69 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from typing import Tuple
+
+class LipschitzDense(nn.Module):
+    features: int
+    use_bias: bool = True
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x):
+        in_features = x.shape[-1]
+        kernel = self.param(
+            "kernel",
+            nn.initializers.lecun_normal(),
+            (in_features, self.features),
+            self.dtype,
+        )
+        kf = kernel.astype(jnp.float32)
+        norm = jnp.sqrt(jnp.sum(jnp.square(kf)) + 1e-8)
+        kernel_n = (kf / norm).astype(self.dtype)
+        y = jnp.dot(x.astype(kernel_n.dtype), kernel_n)
+        if self.use_bias:
+            bias = self.param("bias", nn.initializers.zeros_init(), (self.features,), self.dtype)
+            y = y + bias
+        return y
+
+
+class LipschitzConv(nn.Module):
+    features: int
+    kernel_size: Tuple[int, int] = (3, 3)
+    strides: Tuple[int, int] = (1, 1)
+    padding: str = "SAME"
+    feature_group_count: int = 1
+    use_bias: bool = True
+    dtype: jnp.dtype = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x):
+        in_features = x.shape[-1]
+        kh, kw = self.kernel_size
+        rhs = in_features // self.feature_group_count
+        kernel_shape = (kh, kw, rhs, self.features)
+        kernel = self.param(
+            "kernel",
+            nn.initializers.lecun_normal(),
+            kernel_shape,
+            self.dtype,
+        )
+        kf = kernel.astype(jnp.float32)
+        norm = jnp.sqrt(jnp.sum(jnp.square(kf)) + 1e-8)
+        kernel_n = (kf / norm).astype(self.dtype)
+        y = jax.lax.conv_general_dilated(
+            x.astype(kernel_n.dtype),
+            kernel_n,
+            self.strides,
+            self.padding,
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            feature_group_count=self.feature_group_count,
+        )
+        if self.use_bias:
+            bias = self.param("bias", nn.initializers.zeros_init(), (self.features,), self.dtype)
+            y = y + bias
+        return y.astype(self.dtype)
+
 
 class BlurPool(nn.Module):
     """Anti-aliasing filter (BlurPool) for downsampling."""
@@ -130,7 +193,9 @@ class MinibatchDiscrimination(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        T = nn.Dense(self.num_kernels * self.kernel_dim, use_bias=False, dtype=self.dtype)(x)
+        T = LipschitzDense(
+            self.num_kernels * self.kernel_dim, use_bias=False, dtype=self.dtype
+        )(x)
         T = T.reshape((x.shape[0], self.num_kernels, self.kernel_dim))
 
         T_f32 = T.astype(jnp.float32)

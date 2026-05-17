@@ -78,7 +78,9 @@ def zero_centered_repulsion_loss(mu, all_mu, log_var, all_log_var, temperature=0
 
 def compute_cost_matrix(X, Y):
     dist = jnp.sum(X**2, axis=1, keepdims=True) + jnp.sum(Y**2, axis=1) - 2 * jnp.dot(X, Y.T)
-    return jnp.maximum(dist, 0.0)
+    dist = jnp.maximum(dist, 0.0)
+    d = X.shape[-1]
+    return dist / jnp.maximum(jnp.asarray(d, dtype=dist.dtype), jnp.asarray(1.0, dtype=dist.dtype))
 
 def sinkhorn_ot_primal(C, epsilon=0.05, max_iter=15):
     import jax
@@ -101,7 +103,7 @@ def sinkhorn_ot_primal(C, epsilon=0.05, max_iter=15):
     P = jnp.exp(log_P)
     
     linear_cost = jnp.sum(P * C)
-    kl_cost = jnp.sum(P * jnp.log(jnp.clip(P, a_min=1e-30))) + jnp.log(n * m)
+    kl_cost = jnp.sum(P * jnp.log(jnp.maximum(P, 1e-30))) + jnp.log(n * m)
     return linear_cost + epsilon * kl_cost
 
 def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):

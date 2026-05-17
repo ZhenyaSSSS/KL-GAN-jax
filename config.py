@@ -21,7 +21,7 @@ class Config:
     
     batch_size_per_device: int = 256
     epochs: int = 500
-    lr_gen: float = 0.0001
+    lr_gen: float = 0.0002
     lr_disc: float = 0.00005
     beta1: float = 0.5
     beta2: float = 0.999
@@ -31,7 +31,7 @@ class Config:
 
     loss_type: str = "manifold"
     manifold_proj_dim: int = 16
-    lambda_contrastive: float = 1.0
+    lambda_contrastive: float = 0.1
     lambda_decorr: float = 1.0
     lambda_cov: float = 1.0
     sinkhorn_epsilon: float = 0.05
