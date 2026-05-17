@@ -99,32 +99,43 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
     if config.loss_type == "manifold":
         def d_loss_fn(d_params):
-            proj_real = d_state.apply_fn({"params": d_params}, real_images)
-            real_images_aug = apply_simple_augmentation(real_images, aug_rng)
-            proj_real_aug = d_state.apply_fn({"params": d_params}, real_images_aug)
+            # Аугментируем обе ветки: и оригинал (aug1), и пару (aug2)
+            rng_aug1, rng_aug2 = jax.random.split(aug_rng)
+            real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
+            real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
+            
+            proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
+            proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
+            
+            # Для Sinkhorn и Coverage используем первую аугментацию (или можно чистые, но лучше аугментированные для робастности)
+            # Оставим чистые для Sinkhorn, чтобы G учился генерировать без шума
+            proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
             
             fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
             proj_fake = d_state.apply_fn({"params": d_params}, fake_images)
             
-            loss_sinkhorn = -sinkhorn_divergence(proj_real, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
-            loss_contrastive = contrastive_info_nce_loss(proj_real, proj_real_aug)
-            loss_decorr = tpu_feature_decorrelation_loss(proj_real)
-            loss_cov = coverage_loss(proj_real)
+            loss_sinkhorn = -sinkhorn_divergence(proj_real_clean, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
+            
+            # DCL Loss считается между двумя РАЗНЫМИ аугментациями одной картинки
+            loss_contrastive = contrastive_info_nce_loss(proj_real_aug1, proj_real_aug2)
+            
+            loss_decorr = tpu_feature_decorrelation_loss(proj_real_clean)
+            loss_cov = coverage_loss(proj_real_clean)
             
             loss_D = (loss_sinkhorn + 
                       config.lambda_contrastive * loss_contrastive + 
                       config.lambda_decorr * loss_decorr + 
                       config.lambda_cov * loss_cov)
                       
-            return loss_D, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real)
+            return loss_D, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real_clean)
 
-        grads_d, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
+        grads_d, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real_clean) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
 
         def g_loss_fn(g_params):
             fake_images = g_state.apply_fn({"params": g_params}, z, rngs={"noise": noise_rng})
             proj_fake = d_state.apply_fn({"params": d_state.params}, fake_images)
             
-            loss_G = sinkhorn_divergence(proj_real, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
+            loss_G = sinkhorn_divergence(proj_real_clean, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
             return loss_G, loss_G
 
         grads_g, loss_G = jax.grad(g_loss_fn, has_aux=True)(g_state.params)
