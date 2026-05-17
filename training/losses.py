@@ -10,19 +10,6 @@ def calc_stats_stable(f, min_var=1e-5):
     return mu, var_clipped, log_var
 
 
-def calc_stats(f, eps=1e-6):
-    """Legacy helper: mean and variance with epsilon added to variance."""
-    mu = jnp.mean(f, axis=0)
-    var = jnp.mean((f - mu) ** 2, axis=0) + eps
-    return mu, var
-
-
-def kl_divergence_gaussian(mu_p, var_p, mu_q, var_q):
-    """Diagonal Gaussian KL(p || q); prefer kl_divergence_stable for training."""
-    kl = jnp.log(jnp.sqrt(var_q) / jnp.sqrt(var_p)) + (var_p + (mu_p - mu_q) ** 2) / (2 * var_q) - 0.5
-    return jnp.sum(kl)
-
-
 def kl_divergence_stable(mu_p, log_var_p, mu_q, log_var_q, var_p):
     """KL(p || q) for diagonal Gaussians using log-variances (no division by var_q)."""
     term1 = log_var_q - log_var_p

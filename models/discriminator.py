@@ -45,7 +45,6 @@ class DiscBlock(nn.Module):
         return shortcut + x_ffn * gamma
 
 class Discriminator(nn.Module):
-    use_sn: bool = False
     use_mbd: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5

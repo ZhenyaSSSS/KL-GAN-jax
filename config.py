@@ -54,7 +54,6 @@ class Config:
     )
     latent_clip_value: float = 10.0
     latent_npy_path: str = "/kaggle/input/datasets/sautkin/ffhq-sd3-5-vae-repa-e-latents-256/ffhq_latents_32x32x16.npy"
-    use_sn: bool = False
     use_minibatch_discrimination: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
