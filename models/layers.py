@@ -193,7 +193,7 @@ class MinibatchDiscrimination(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        T = LipschitzDense(
+        T = nn.Dense(
             self.num_kernels * self.kernel_dim, use_bias=False, dtype=self.dtype
         )(x)
         T = T.reshape((x.shape[0], self.num_kernels, self.kernel_dim))

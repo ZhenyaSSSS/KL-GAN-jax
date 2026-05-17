@@ -1,6 +1,6 @@
 import flax.linen as nn
 import jax.numpy as jnp
-from models.layers import GeGLU, MinibatchDiscrimination, SpatialReductionAttention, LipschitzDense, LipschitzConv
+from models.layers import GeGLU, MinibatchDiscrimination, SpatialReductionAttention
 
 class DiscBlock(nn.Module):
     """Изотропный блок дискриминатора (ConvNeXt + опционально SRA) без AdaLN"""
@@ -16,7 +16,7 @@ class DiscBlock(nn.Module):
         
         # Local
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        x_local = LipschitzConv(
+        x_local = nn.Conv(
             self.features,
             kernel_size=(3, 3),
             strides=(1, 1),
@@ -39,9 +39,9 @@ class DiscBlock(nn.Module):
         
         # FFN
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
-        x_ffn = LipschitzDense(self.features * 4, dtype=self.dtype)(x)
+        x_ffn = nn.Dense(self.features * 4, dtype=self.dtype)(x)
         x_ffn = GeGLU()(x_ffn)
-        x_ffn = LipschitzDense(self.features, dtype=self.dtype)(x_ffn)
+        x_ffn = nn.Dense(self.features, dtype=self.dtype)(x_ffn)
         
         # Scale residual
         gamma = self.param("gamma", nn.initializers.constant(1e-4), (1, 1, 1, self.features), self.dtype)
@@ -63,7 +63,7 @@ class Discriminator(nn.Module):
         x = x.astype(self.dtype)
         
         # 1. Начальный маппинг в высоком разрешении (32x32)
-        x = LipschitzConv(
+        x = nn.Conv(
             self.base_features,
             kernel_size=(3, 3),
             strides=(1, 1),
@@ -76,7 +76,7 @@ class Discriminator(nn.Module):
             x = nn.remat(DiscBlock)(features=self.base_features, use_attn=True, dtype=self.dtype)(x)
             
         # Downsample: 32x32 -> 16x16
-        x = LipschitzConv(
+        x = nn.Conv(
             self.base_features * 2,
             kernel_size=(3, 3),
             strides=(2, 2),
@@ -89,7 +89,7 @@ class Discriminator(nn.Module):
             x = nn.remat(DiscBlock)(features=self.base_features * 2, use_attn=False, dtype=self.dtype)(x)
             
         # Downsample: 16x16 -> 8x8
-        x = LipschitzConv(
+        x = nn.Conv(
             self.base_features * 4,
             kernel_size=(3, 3),
             strides=(2, 2),
@@ -114,9 +114,9 @@ class Discriminator(nn.Module):
             )(x)
 
         if self.loss_type == "manifold":
-            f = LipschitzDense(self.manifold_proj_dim, dtype=self.dtype)(x)
+            f = nn.Dense(self.manifold_proj_dim, dtype=self.dtype)(x)
             f = nn.tanh(f)
         else:
-            f = LipschitzDense(256, dtype=self.dtype)(x)
+            f = nn.Dense(256, dtype=self.dtype)(x)
             
         return f.astype(jnp.float32)
