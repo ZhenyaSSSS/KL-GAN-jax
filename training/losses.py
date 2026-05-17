@@ -117,17 +117,40 @@ def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
     
     return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
-def contrastive_info_nce_loss(proj, proj_aug, temperature=0.2):
+def contrastive_info_nce_loss(z1, z2, temperature=0.1):
+    """Decoupled Contrastive Learning (DCL) loss."""
     import jax
-    proj = proj / jnp.linalg.norm(proj, axis=1, keepdims=True)
-    proj_aug = proj_aug / jnp.linalg.norm(proj_aug, axis=1, keepdims=True)
+    import jax.scipy.special
     
-    sim_matrix = jnp.dot(proj, proj_aug.T) / temperature
-    labels = jnp.arange(proj.shape[0])
-    
-    log_probs = jax.nn.log_softmax(sim_matrix, axis=-1)
-    loss = -jnp.mean(log_probs[jnp.arange(proj.shape[0]), labels])
-    return loss
+    N = z1.shape[0]
+
+    # 1. L2-нормализация эмбеддингов
+    z1 = z1 / jnp.linalg.norm(z1, axis=-1, keepdims=True)
+    z2 = z2 / jnp.linalg.norm(z2, axis=-1, keepdims=True)
+
+    # 2. Собираем все признаки в один батч размером (2N, D)
+    z = jnp.concatenate([z1, z2], axis=0)
+
+    # 3. Считаем матрицу косинусного сходства "Всех со Всеми"
+    sim_matrix = jnp.dot(z, z.T) / temperature
+
+    # 4. Индексы для позитивных пар
+    labels = jnp.arange(2 * N)
+    pos_indices = (labels + N) % (2 * N)
+    pos_sim = sim_matrix[labels, pos_indices]
+
+    # 5. Маска для негативных примеров (выкидываем диагональ и позитивные пары)
+    mask = jnp.ones((2 * N, 2 * N))
+    mask = mask.at[labels, labels].set(0.0)
+    mask = mask.at[labels, pos_indices].set(0.0)
+
+    # 6. Считаем негативную часть через logsumexp
+    neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
+
+    # 7. Итоговая формула DCL
+    loss_per_sample = -pos_sim + neg_logsumexp
+
+    return jnp.mean(loss_per_sample)
 
 def tpu_feature_decorrelation_loss(local_proj):
     import jax
