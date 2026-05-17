@@ -143,6 +143,7 @@ def main():
         dtype=dt,
     )
     d_model = Discriminator(
+        base_features=config.disc_base_features,
         use_sn=config.use_sn,
         use_mbd=config.use_minibatch_discrimination,
         num_kernels_mbd=config.num_kernels_mbd,

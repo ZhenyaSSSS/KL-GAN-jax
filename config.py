@@ -31,9 +31,9 @@ class Config:
 
     loss_type: str = "manifold"
     manifold_proj_dim: int = 16
-    lambda_contrastive: float = 0.1
-    lambda_decorr: float = 1.0
-    lambda_cov: float = 1.0
+    lambda_contrastive: float = 5.0
+    lambda_decorr: float = 0.0
+    lambda_cov: float = 5.0
     sinkhorn_epsilon: float = 0.05
     sinkhorn_max_iter: int = 15
 
@@ -59,9 +59,10 @@ class Config:
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
 
-    gen_features: int = 128
-    gen_depth: int = 7
-    gen_mapping_dim: int = 512
+    disc_base_features: int = 192
+    gen_features: int = 256
+    gen_depth: int = 12
+    gen_mapping_dim: int = 1024
 
     network_dtype: str = "bfloat16"
     jax_matmul_precision: str = "default"

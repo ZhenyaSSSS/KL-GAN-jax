@@ -6,15 +6,15 @@ seed: 42
 batch_size_per_device: 256
 epochs: 500
 lr_gen: 0.0002
-lr_disc: 0.00005
+lr_disc: 0.0002
 beta1: 0.5
 beta2: 0.999
 latent_dim: 128
 loss_type: "manifold"
 manifold_proj_dim: 16
-lambda_contrastive: 1.0
-lambda_decorr: 1.0
-lambda_cov: 1.0
+lambda_contrastive: 4.0
+lambda_decorr: 0.0
+lambda_cov: 5.0
 sinkhorn_epsilon: 0.05
 sinkhorn_max_iter: 15
 lambda_div: 0.5
@@ -31,9 +31,10 @@ use_minibatch_discrimination: false
 num_kernels_mbd: 100
 kernel_dim_mbd: 5
 
-gen_features: 128
-gen_depth: 7
-gen_mapping_dim: 512
+disc_base_features: 192
+gen_features: 256
+gen_depth: 12
+gen_mapping_dim: 1024
 
 # Dtype: float32 | bfloat16 (weights/activations for conv/linear; BN uses float32)
 network_dtype: bfloat16

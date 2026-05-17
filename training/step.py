@@ -14,9 +14,19 @@ from training.losses import (
 from config import config
 
 def apply_simple_augmentation(images, rng):
-    """Simple noise augmentation for contrastive loss."""
-    noise = jax.random.normal(rng, images.shape) * 0.05
-    return images + noise
+    """SOTA-like augmentation for latents (Noise + Spatial Flip)."""
+    rng1, rng2 = jax.random.split(rng, 2)
+    
+    # 1. Gaussian Noise (0.05 std)
+    noise = jax.random.normal(rng1, images.shape) * 0.05
+    x = images + noise
+    
+    # 2. Random Horizontal Flip (safe for spatial VAE latents)
+    flip_mask = jax.random.bernoulli(rng2, 0.5, (images.shape[0], 1, 1, 1))
+    x_flipped = jnp.flip(x, axis=2)
+    x = jnp.where(flip_mask, x_flipped, x)
+    
+    return x
 
 @partial(jax.pmap, axis_name="tpu_nodes")
 def train_step(rng, g_state, d_state, ema_g_params, real_images):
