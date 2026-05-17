@@ -14,20 +14,28 @@ from training.losses import (
 from config import config
 
 def augment_single(img, rng):
-    rng_noise, rng_flip, rng_crop, rng_cutout = jax.random.split(rng, 4)
+    rng_noise, rng_flip_h, rng_flip_v, rng_crop, rng_cutout = jax.random.split(rng, 5)
     
     # 1. Gaussian Noise (0.05 std)
     img = img + jax.random.normal(rng_noise, img.shape) * 0.05
     
     # 2. Random Horizontal Flip
     img = jax.lax.cond(
-        jax.random.bernoulli(rng_flip, 0.5),
+        jax.random.bernoulli(rng_flip_h, 0.5),
         lambda x: jnp.flip(x, axis=1),
         lambda x: x,
         img
     )
     
-    # 3. Random Translation (Pad & Crop)
+    # 3. Random Vertical Flip
+    img = jax.lax.cond(
+        jax.random.bernoulli(rng_flip_v, 0.5),
+        lambda x: jnp.flip(x, axis=0),
+        lambda x: x,
+        img
+    )
+    
+    # 4. Random Translation (Pad & Crop)
     # 2 pixels in 32x32 latent space = 16 pixels in 256x256 image space
     pad = 2
     img_pad = jnp.pad(img, ((pad, pad), (pad, pad), (0, 0)), mode='edge')
@@ -46,7 +54,7 @@ def augment_single(img, rng):
     return img
 
 def apply_simple_augmentation(images, rng):
-    """SOTA-like augmentation for latents (Noise + Spatial Flip + Translate + Cutout)."""
+    """SOTA-like augmentation for latents (Noise + Spatial Flips + Translate + Cutout)."""
     rngs = jax.random.split(rng, images.shape[0])
     return jax.vmap(augment_single)(images, rngs)
 
