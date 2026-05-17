@@ -30,15 +30,13 @@ class Generator(nn.Module):
     @nn.compact
     def __call__(self, z, noise=None):
         w = MappingNetwork(features=self.mapping_dim, num_layers=4, dtype=jnp.float32)(z).astype(self.dtype)
-        
-        # Обучаемая константная картинка
+
         x_mean = self.param(
             "constant_input",
             nn.initializers.normal(stddev=0.02),
             (1, self.image_size, self.image_size, self.features),
         )
-        
-        # Обучаемый std для шума
+
         x_std = self.param(
             "noise_std",
             nn.initializers.constant(0.01),

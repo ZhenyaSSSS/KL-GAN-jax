@@ -117,12 +117,12 @@ def get_2d_rope_sin_cos(H, W, head_dim, reduction_ratio=1, dtype=jnp.float32):
     emb = np.concatenate([freqs, freqs], axis=-1)
     cos = np.cos(emb)
     sin = np.sin(emb)
-    # Возвращаем статические константы (jnp.asarray превратит их в frozen constants в графе XLA)
+    # jnp.asarray: bake RoPE tables as compile-time constants in XLA.
     return jnp.asarray(cos[None, ..., None, :], dtype=dtype), jnp.asarray(sin[None, ..., None, :], dtype=dtype)
 
 
 class SpatialReductionAttention(nn.Module):
-    """Эффективный Attention: Q в полном разрешении, K и V в сжатом; 2D RoPE на Q и K."""
+    """Efficient attention: full-res Q, pooled K/V; 2D RoPE on Q and K."""
     features: int
     num_heads: int = 4
     reduction_ratio: int = 2

@@ -94,7 +94,7 @@ def main():
 
     rng = jax.random.PRNGKey(config.seed)
 
-    print("Загрузка латентного датасета...")
+    print("Loading latent dataset...")
     dataset_sharded, samples_per_device = load_latents_sharded(
         npy_path=config.latent_npy_path,
         latent_mean=config.latent_mean,
@@ -106,7 +106,7 @@ def main():
         raise ValueError("Dataset smaller than per-device batch size.")
     steps_per_epoch = num_samples // config.batch_size_per_device
 
-    print("Загрузка PyTorch VAE на CPU для декодирования (JAX заберет TPU)...")
+    print("Loading PyTorch VAE on CPU for decode (JAX uses TPU)...")
     vae = AutoencoderKL.from_pretrained("REPA-E/e2e-sd3.5-vae").to("cpu")
     vae.eval()
     vae.requires_grad_(False)
@@ -336,7 +336,7 @@ def main():
         rng, preview_noise_rng = jax.random.split(rng)
         fake_test_latents = gen_batch(ema_g_params_cpu, test_z[:16], preview_noise_rng) 
         
-        # --- АСИНХРОННАЯ ОТПРАВКА В W&B ---
+        # Decode preview in a background thread so training is not blocked.
         def decode_and_log(latents, step):
             rgb_images = decode_latents_to_rgb(latents)
             grid = create_image_grid(rgb_images, grid_size=(4, 4))
@@ -346,7 +346,7 @@ def main():
         t = threading.Thread(target=decode_and_log, args=(latents_np, global_step))
         t.start()
 
-        # --- ЭВАЛЮАЦИЯ (Latent KL) ---
+        # Latent-space KL vs batch Gaussian stats (diagnostic only).
         if epoch % config.eval_every_epochs == 0:
             real_eval = on_host[:1024] 
             rng, z_rng = jax.random.split(rng)
@@ -376,7 +376,7 @@ def main():
                 
             fake_latents_fid = np.concatenate(fake_latents_fid, axis=0)
             
-            # Демасштабируем обратно
+            # Undo standardization before saving / FID decode.
             if config.latent_clip_value is not None:
                 fake_latents_fid = np.clip(fake_latents_fid, -config.latent_clip_value, config.latent_clip_value)
             mean_arr = np.array(config.latent_mean, dtype=np.float32).reshape(1, 1, 1, -1)

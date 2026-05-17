@@ -74,9 +74,11 @@ def zero_centered_repulsion_loss(mu, all_mu, log_var, all_log_var, temperature=0
     loss = t * jnp.log(mean_others_exp)
     return jnp.where(num_devices > 1, loss, jnp.asarray(0.0, dtype=loss.dtype))
 
-# --- Manifold-GAN Losses ---
+# Manifold / KL-GAN losses
+
 
 def compute_cost_matrix(X, Y):
+    """Squared L2 pairwise cost; divide by D so scale is O(1) for tanh-bounded D-dim features."""
     dist = jnp.sum(X**2, axis=1, keepdims=True) + jnp.sum(Y**2, axis=1) - 2 * jnp.dot(X, Y.T)
     dist = jnp.maximum(dist, 0.0)
     d = X.shape[-1]
@@ -118,36 +120,28 @@ def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
     return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
 def contrastive_info_nce_loss(z1, z2, temperature=0.1):
-    """Decoupled Contrastive Learning (DCL) loss."""
-    import jax
+    """Decoupled Contrastive Learning (DCL): -S+ + logsumexp(S-) over negatives only (no exp(S+) in denominator)."""
     import jax.scipy.special
-    
+
     N = z1.shape[0]
 
-    # 1. L2-нормализация эмбеддингов
     z1 = z1 / jnp.linalg.norm(z1, axis=-1, keepdims=True)
     z2 = z2 / jnp.linalg.norm(z2, axis=-1, keepdims=True)
 
-    # 2. Собираем все признаки в один батч размером (2N, D)
     z = jnp.concatenate([z1, z2], axis=0)
 
-    # 3. Считаем матрицу косинусного сходства "Всех со Всеми"
     sim_matrix = jnp.dot(z, z.T) / temperature
 
-    # 4. Индексы для позитивных пар
     labels = jnp.arange(2 * N)
     pos_indices = (labels + N) % (2 * N)
     pos_sim = sim_matrix[labels, pos_indices]
 
-    # 5. Маска для негативных примеров (выкидываем диагональ и позитивные пары)
     mask = jnp.ones((2 * N, 2 * N))
     mask = mask.at[labels, labels].set(0.0)
     mask = mask.at[labels, pos_indices].set(0.0)
 
-    # 6. Считаем негативную часть через logsumexp
     neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
 
-    # 7. Итоговая формула DCL
     loss_per_sample = -pos_sim + neg_logsumexp
 
     return jnp.mean(loss_per_sample)
@@ -164,7 +158,7 @@ def tpu_feature_decorrelation_loss(local_proj):
     std_proj = jnp.std(all_projs, axis=1, keepdims=True) + 1e-6
     z_all = (all_projs - mean_proj) / std_proj
     
-    z_all_transposed = jnp.transpose(z_all, (0, 2, 1)) # [num_tpus, D, B]
+    z_all_transposed = jnp.transpose(z_all, (0, 2, 1))
     z_flat = z_all_transposed.reshape(num_tpus * D, B)
     cov_matrix = jnp.dot(z_flat, z_flat.T) / (B - 1)
     

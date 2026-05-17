@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from models.layers import GeGLU, MinibatchDiscrimination, SpatialReductionAttention
 
 class DiscBlock(nn.Module):
-    """Изотропный блок дискриминатора (ConvNeXt + опционально SRA) без AdaLN"""
+    """ConvNeXt-style block with optional spatial reduction attention (no AdaLN)."""
     features: int
     num_heads: int = 4
     use_attn: bool = True
@@ -13,8 +13,7 @@ class DiscBlock(nn.Module):
     @nn.compact
     def __call__(self, x):
         shortcut = x
-        
-        # Local
+
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x_local = nn.Conv(
             self.features,
@@ -26,7 +25,6 @@ class DiscBlock(nn.Module):
         )(x)
         
         if self.use_attn:
-            # Global Attn (SRA)
             attn_out = SpatialReductionAttention(
                 features=self.features, 
                 num_heads=self.num_heads, 
@@ -36,16 +34,14 @@ class DiscBlock(nn.Module):
             x = x_local + attn_out
         else:
             x = x_local
-        
-        # FFN
+
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x_ffn = nn.Dense(self.features * 4, dtype=self.dtype)(x)
         x_ffn = GeGLU()(x_ffn)
         x_ffn = nn.Dense(self.features, dtype=self.dtype)(x_ffn)
         
-        # Scale residual
         gamma = self.param("gamma", nn.initializers.constant(1e-4), (1, 1, 1, self.features), self.dtype)
-        
+
         return shortcut + x_ffn * gamma
 
 class Discriminator(nn.Module):
@@ -61,8 +57,7 @@ class Discriminator(nn.Module):
     @nn.compact
     def __call__(self, x):
         x = x.astype(self.dtype)
-        
-        # 1. Начальный маппинг в высоком разрешении (32x32)
+
         x = nn.Conv(
             self.base_features,
             kernel_size=(3, 3),
@@ -70,12 +65,10 @@ class Discriminator(nn.Module):
             padding="SAME",
             dtype=self.dtype,
         )(x)
-        
-        # Stage 1: 32x32 (с Attention)
+
         for _ in range(2):
             x = nn.remat(DiscBlock)(features=self.base_features, use_attn=True, dtype=self.dtype)(x)
-            
-        # Downsample: 32x32 -> 16x16
+
         x = nn.Conv(
             self.base_features * 2,
             kernel_size=(3, 3),
@@ -83,12 +76,10 @@ class Discriminator(nn.Module):
             padding="SAME",
             dtype=self.dtype,
         )(x)
-        
-        # Stage 2: 16x16 (только локальные текстуры ConvNeXt)
+
         for _ in range(2):
             x = nn.remat(DiscBlock)(features=self.base_features * 2, use_attn=False, dtype=self.dtype)(x)
-            
-        # Downsample: 16x16 -> 8x8
+
         x = nn.Conv(
             self.base_features * 4,
             kernel_size=(3, 3),
@@ -96,8 +87,7 @@ class Discriminator(nn.Module):
             padding="SAME",
             dtype=self.dtype,
         )(x)
-        
-        # Stage 3: 8x8 (только локальные текстуры ConvNeXt)
+
         for _ in range(2):
             x = nn.remat(DiscBlock)(features=self.base_features * 4, use_attn=False, dtype=self.dtype)(x)
             

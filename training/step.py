@@ -14,34 +14,30 @@ from training.losses import (
 from config import config
 
 def augment_single(img, rng):
+    """Probabilistic spatial augmentations for VAE latents (contrastive branch only)."""
     k = jax.random.split(rng, 11)
-    
-    # 1. Gaussian Noise (p=0.2)
+
     img = jax.lax.cond(
         jax.random.bernoulli(k[0], 0.2),
         lambda x: x + jax.random.normal(k[1], x.shape) * 0.05,
         lambda x: x,
-        img
+        img,
     )
-    
-    # 2. Horizontal Flip (p=0.5)
+
     img = jax.lax.cond(
         jax.random.bernoulli(k[2], 0.5),
         lambda x: jnp.flip(x, axis=1),
         lambda x: x,
-        img
+        img,
     )
-    
-    # 3. Vertical Flip (p=0.5)
+
     img = jax.lax.cond(
         jax.random.bernoulli(k[3], 0.5),
         lambda x: jnp.flip(x, axis=0),
         lambda x: x,
-        img
+        img,
     )
-    
-    # 4. Rot90 (k=0,1,2,3)
-    # 90-degree rotations are safe for spatial latents
+
     num_rots = jax.random.randint(k[4], (), 0, 4)
     img = jax.lax.switch(
         num_rots,
@@ -51,44 +47,44 @@ def augment_single(img, rng):
             lambda x: jnp.rot90(x, k=2, axes=(0, 1)),
             lambda x: jnp.rot90(x, k=3, axes=(0, 1)),
         ],
-        img
+        img,
     )
-    
-    # 5. Translation (Pad & Crop, p=0.8)
+
     def do_translate(x):
         pad = 2
-        x_pad = jnp.pad(x, ((pad, pad), (pad, pad), (0, 0)), mode='edge')
+        x_pad = jnp.pad(x, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
         sy = jax.random.randint(k[5], (), 0, 2 * pad + 1)
         sx = jax.random.randint(k[6], (), 0, 2 * pad + 1)
         return jax.lax.dynamic_slice(x_pad, (sy, sx, 0), x.shape)
-    
+
     img = jax.lax.cond(
         jax.random.bernoulli(k[7], 0.8),
         do_translate,
         lambda x: x,
-        img
+        img,
     )
-    
-    # 6. Cutout (Random Erasing 6x6 patch, p=0.5)
+
     def do_cutout(x):
         hole_size = 6
         cy = jax.random.randint(k[8], (), 0, x.shape[0] - hole_size)
         cx = jax.random.randint(k[9], (), 0, x.shape[1] - hole_size)
         mask = jnp.ones_like(x)
-        mask = jax.lax.dynamic_update_slice(mask, jnp.zeros((hole_size, hole_size, x.shape[2])), (cy, cx, 0))
+        mask = jax.lax.dynamic_update_slice(
+            mask, jnp.zeros((hole_size, hole_size, x.shape[2])), (cy, cx, 0)
+        )
         return x * mask
-        
+
     img = jax.lax.cond(
         jax.random.bernoulli(k[10], 0.5),
         do_cutout,
         lambda x: x,
-        img
+        img,
     )
-    
+
     return img
 
+
 def apply_simple_augmentation(images, rng):
-    """SOTA-like augmentation for latents (Noise, Flips, Rot90, Translate, Cutout)."""
     rngs = jax.random.split(rng, images.shape[0])
     return jax.vmap(augment_single)(images, rngs)
 
@@ -99,24 +95,26 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
     if config.loss_type == "manifold":
         def d_loss_fn(d_params):
-            # Аугментируем обе ветки: и оригинал (aug1), и пару (aug2)
             rng_aug1, rng_aug2 = jax.random.split(aug_rng)
             real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
             real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
-            
+
             proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
             proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
-            
-            # Для Sinkhorn и Coverage используем первую аугментацию (или можно чистые, но лучше аугментированные для робастности)
-            # Оставим чистые для Sinkhorn, чтобы G учился генерировать без шума
+
+            # Clean latents for OT / coverage / decorr; generator is trained against this distribution.
             proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
-            
+
             fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
             proj_fake = d_state.apply_fn({"params": d_params}, fake_images)
-            
-            loss_sinkhorn = -sinkhorn_divergence(proj_real_clean, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
-            
-            # DCL Loss считается между двумя РАЗНЫМИ аугментациями одной картинки
+
+            loss_sinkhorn = -sinkhorn_divergence(
+                proj_real_clean,
+                proj_fake,
+                epsilon=config.sinkhorn_epsilon,
+                max_iter=config.sinkhorn_max_iter,
+            )
+
             loss_contrastive = contrastive_info_nce_loss(proj_real_aug1, proj_real_aug2)
 
             if config.lambda_decorr != 0.0:

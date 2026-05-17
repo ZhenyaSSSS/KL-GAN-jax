@@ -12,9 +12,9 @@ beta2: 0.999
 latent_dim: 128
 loss_type: "manifold"
 manifold_proj_dim: 16
-lambda_contrastive: 4.0
+lambda_contrastive: 2.0
 lambda_decorr: 0.0
-lambda_cov: 5.0
+lambda_cov: 3.5
 sinkhorn_epsilon: 0.05
 sinkhorn_max_iter: 15
 lambda_div: 0.5
