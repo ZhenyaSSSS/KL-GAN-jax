@@ -134,9 +134,17 @@ def main():
         return decoded_images
 
     dt = config.compute_dtype
-    g_model = Generator(channels=config.channels, image_size=config.image_size, dtype=dt)
+    g_model = Generator(
+        channels=config.channels,
+        image_size=config.image_size,
+        features=config.gen_features,
+        depth=config.gen_depth,
+        mapping_dim=config.gen_mapping_dim,
+        dtype=dt,
+    )
     d_model = Discriminator(
         use_sn=config.use_sn,
+        use_mbd=config.use_minibatch_discrimination,
         num_kernels_mbd=config.num_kernels_mbd,
         kernel_dim_mbd=config.kernel_dim_mbd,
         dtype=dt,

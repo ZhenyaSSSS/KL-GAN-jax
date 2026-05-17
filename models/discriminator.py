@@ -43,6 +43,7 @@ class DiscBlock(nn.Module):
 
 class Discriminator(nn.Module):
     use_sn: bool = False
+    use_mbd: bool = False
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
     base_features: int = 128
@@ -84,15 +85,14 @@ class Discriminator(nn.Module):
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.swish(x)
         
-        # Global Pooling
         x = jnp.mean(x, axis=(1, 2))
-        
-        # Minibatch Discrimination
-        x = MinibatchDiscrimination(
-            num_kernels=self.num_kernels_mbd,
-            kernel_dim=self.kernel_dim_mbd,
-            dtype=self.dtype,
-        )(x)
+
+        if self.use_mbd:
+            x = MinibatchDiscrimination(
+                num_kernels=self.num_kernels_mbd,
+                kernel_dim=self.kernel_dim_mbd,
+                dtype=self.dtype,
+            )(x)
 
         if self.loss_type == "manifold":
             f = nn.Dense(self.manifold_proj_dim, dtype=self.dtype)(x)
