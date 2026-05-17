@@ -29,7 +29,7 @@ class Config:
     lambda_div: float = 0.5
     diversity_temperature: float = 0.5
 
-    loss_type: str = "kl"
+    loss_type: str = "manifold"
     manifold_proj_dim: int = 16
     lambda_contrastive: float = 1.0
     lambda_decorr: float = 1.0

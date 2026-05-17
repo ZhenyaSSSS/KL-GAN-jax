@@ -47,7 +47,7 @@ class Discriminator(nn.Module):
     kernel_dim_mbd: int = 5
     base_features: int = 128
     dtype: jnp.dtype = jnp.bfloat16
-    loss_type: str = "kl"
+    loss_type: str = "manifold"
     manifold_proj_dim: int = 16
 
     @nn.compact
