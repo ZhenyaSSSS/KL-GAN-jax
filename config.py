@@ -31,6 +31,7 @@ class Config:
 
     loss_type: str = "manifold"
     manifold_proj_dim: int = 16
+    contrastive_pairing: str = "real_aug"
     lambda_contrastive: float = 4.0
     lambda_decorr: float = 0.0
     lambda_cov: float = 5.0

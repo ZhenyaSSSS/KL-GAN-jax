@@ -10,8 +10,10 @@ lr_disc: 0.0002
 beta1: 0.5
 beta2: 0.999
 latent_dim: 128
-loss_type: "kl"
+loss_type: "manifold"
 manifold_proj_dim: 16
+# manifold only: real_aug | aug_aug
+contrastive_pairing: "real_aug"
 lambda_contrastive: 1.0
 lambda_decorr: 0.0
 lambda_cov: 1.0

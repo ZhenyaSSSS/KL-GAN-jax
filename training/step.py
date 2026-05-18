@@ -95,14 +95,17 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
     if config.loss_type == "manifold":
         def d_loss_fn(d_params):
-            rng_aug1, rng_aug2 = jax.random.split(aug_rng)
-            real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
-            real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
+            if config.contrastive_pairing == "aug_aug":
+                rng_aug1, rng_aug2 = jax.random.split(aug_rng)
+                real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
+                real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
+                proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
+                proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
+            else:
+                rng_aug1, _ = jax.random.split(aug_rng)
+                real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
+                proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
 
-            proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
-            proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
-
-            # Clean latents for OT / coverage / decorr; generator is trained against this distribution.
             proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
 
             fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
@@ -115,7 +118,10 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
                 max_iter=config.sinkhorn_max_iter,
             )
 
-            loss_contrastive = contrastive_info_nce_loss(proj_real_aug1, proj_real_aug2)
+            if config.contrastive_pairing == "aug_aug":
+                loss_contrastive = contrastive_info_nce_loss(proj_real_aug1, proj_real_aug2)
+            else:
+                loss_contrastive = contrastive_info_nce_loss(proj_real_clean, proj_real_aug1)
 
             if config.lambda_decorr != 0.0:
                 loss_decorr = tpu_feature_decorrelation_loss(proj_real_clean)
