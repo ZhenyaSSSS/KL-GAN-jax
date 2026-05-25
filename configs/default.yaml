@@ -32,9 +32,9 @@ use_minibatch_discrimination: false
 num_kernels_mbd: 100
 kernel_dim_mbd: 5
 
-disc_base_features: 192
-gen_features: 256
-gen_depth: 12
+disc_base_features: 256
+gen_features: 384
+gen_depth: 16
 gen_mapping_dim: 1024
 
 # Dtype: float32 | bfloat16 (weights/activations for conv/linear; BN uses float32)

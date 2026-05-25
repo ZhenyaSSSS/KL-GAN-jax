@@ -59,9 +59,9 @@ class Config:
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
 
-    disc_base_features: int = 192
-    gen_features: int = 256
-    gen_depth: int = 12
+    disc_base_features: int = 256
+    gen_features: int = 384
+    gen_depth: int = 16
     gen_mapping_dim: int = 1024
 
     network_dtype: str = "bfloat16"
