@@ -106,32 +106,45 @@ def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
     
     return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
-def contrastive_info_nce_loss(z1, z2, temperature=0.1):
-    """Decoupled Contrastive Learning (DCL): -S+ + logsumexp(S-) over negatives only (no exp(S+) in denominator)."""
-    import jax.scipy.special
-
+def _contrastive_sim_matrix(z1, z2, temperature):
     N = z1.shape[0]
-
     z1 = z1 / jnp.linalg.norm(z1, axis=-1, keepdims=True)
     z2 = z2 / jnp.linalg.norm(z2, axis=-1, keepdims=True)
-
     z = jnp.concatenate([z1, z2], axis=0)
-
     sim_matrix = jnp.dot(z, z.T) / temperature
-
     labels = jnp.arange(2 * N)
     pos_indices = (labels + N) % (2 * N)
     pos_sim = sim_matrix[labels, pos_indices]
+    return sim_matrix, labels, pos_indices, pos_sim
 
-    mask = jnp.ones((2 * N, 2 * N))
+
+def contrastive_info_nce_loss(z1, z2, temperature=0.1):
+    """SimCLR InfoNCE: -log(exp(S+) / sum_{j!=i} exp(S_ij)), positive in denominator."""
+    import jax.scipy.special
+
+    sim_matrix, labels, _, pos_sim = _contrastive_sim_matrix(z1, z2, temperature)
+    mask = jnp.ones(sim_matrix.shape)
+    mask = mask.at[labels, labels].set(0.0)
+    denom_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
+    return jnp.mean(-pos_sim + denom_logsumexp)
+
+
+def contrastive_dcl_loss(z1, z2, temperature=0.1):
+    """DCL: -S+ + logsumexp(S-) only; exp(S+) excluded from denominator."""
+    import jax.scipy.special
+
+    sim_matrix, labels, pos_indices, pos_sim = _contrastive_sim_matrix(z1, z2, temperature)
+    mask = jnp.ones(sim_matrix.shape)
     mask = mask.at[labels, labels].set(0.0)
     mask = mask.at[labels, pos_indices].set(0.0)
-
     neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
+    return jnp.mean(-pos_sim + neg_logsumexp)
 
-    loss_per_sample = -pos_sim + neg_logsumexp
 
-    return jnp.mean(loss_per_sample)
+def contrastive_loss(z1, z2, loss_type="infonce", temperature=0.1):
+    if loss_type == "dcl":
+        return contrastive_dcl_loss(z1, z2, temperature)
+    return contrastive_info_nce_loss(z1, z2, temperature)
 
 def tpu_feature_decorrelation_loss(local_proj):
     import jax
