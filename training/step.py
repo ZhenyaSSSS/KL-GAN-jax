@@ -15,11 +15,13 @@ from config import config
 
 def augment_single(img, rng):
     """Probabilistic spatial augmentations for VAE latents (contrastive branch only)."""
+    dtype = img.dtype
+    img = img.astype(jnp.float32)
     k = jax.random.split(rng, 11)
 
     img = jax.lax.cond(
         jax.random.bernoulli(k[0], 0.2),
-        lambda x: x + jax.random.normal(k[1], x.shape) * 0.05,
+        lambda x: x + jax.random.normal(k[1], x.shape, dtype=jnp.float32) * 0.05,
         lambda x: x,
         img,
     )
@@ -81,7 +83,7 @@ def augment_single(img, rng):
         img,
     )
 
-    return img
+    return img.astype(dtype)
 
 
 def apply_simple_augmentation(images, rng):
