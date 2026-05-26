@@ -123,7 +123,11 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
             else:
                 z1, z2 = proj_real_clean, proj_real_aug1
             loss_contrastive = contrastive_loss(
-                z1, z2, loss_type=config.contrastive_loss_type, temperature=config.contrastive_temperature
+                z1,
+                z2,
+                loss_type=config.contrastive_loss_type,
+                temperature=config.contrastive_temperature,
+                z_fake=proj_fake,
             )
 
             if config.lambda_decorr != 0.0:

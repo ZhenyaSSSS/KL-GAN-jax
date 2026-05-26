@@ -141,7 +141,32 @@ def contrastive_dcl_loss(z1, z2, temperature=0.1):
     return jnp.mean(-pos_sim + neg_logsumexp)
 
 
-def contrastive_loss(z1, z2, loss_type="infonce", temperature=0.1):
+def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
+    """DCL on real/aug anchors; fake projections act as extra negatives (no extra forward)."""
+    import jax.scipy.special
+
+    N = z_real.shape[0]
+    z_r = z_real / jnp.linalg.norm(z_real, axis=-1, keepdims=True)
+    z_ra = z_real_aug / jnp.linalg.norm(z_real_aug, axis=-1, keepdims=True)
+    z_f = z_fake / jnp.linalg.norm(z_fake, axis=-1, keepdims=True)
+    z = jnp.concatenate([z_r, z_ra, z_f], axis=0)
+    sim_matrix = jnp.dot(z, z.T) / temperature
+    anchors_sim = sim_matrix[: 2 * N, :]
+    labels = jnp.arange(2 * N)
+    pos_indices = (labels + N) % (2 * N)
+    pos_sim = anchors_sim[labels, pos_indices]
+    mask = jnp.ones((2 * N, 3 * N))
+    mask = mask.at[labels, labels].set(0.0)
+    mask = mask.at[labels, pos_indices].set(0.0)
+    neg_logsumexp = jax.scipy.special.logsumexp(anchors_sim, axis=1, b=mask)
+    return jnp.mean(-pos_sim + neg_logsumexp)
+
+
+def contrastive_loss(z1, z2, loss_type="yin_yang", temperature=0.1, z_fake=None):
+    if loss_type == "yin_yang":
+        if z_fake is None:
+            raise ValueError("yin_yang contrastive loss requires z_fake")
+        return yin_yang_contrastive_loss(z1, z2, z_fake, temperature)
     if loss_type == "dcl":
         return contrastive_dcl_loss(z1, z2, temperature)
     return contrastive_info_nce_loss(z1, z2, temperature)

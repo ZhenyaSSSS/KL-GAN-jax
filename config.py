@@ -32,7 +32,7 @@ class Config:
     loss_type: str = "manifold"
     manifold_proj_dim: int = 16
     contrastive_pairing: str = "real_aug"
-    contrastive_loss_type: str = "infonce"
+    contrastive_loss_type: str = "yin_yang"
     contrastive_temperature: float = 0.1
     lambda_contrastive: float = 4.0
     lambda_decorr: float = 0.0
