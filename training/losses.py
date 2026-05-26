@@ -106,12 +106,19 @@ def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
     
     return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
+def _l2_normalize_rows(x, eps=1e-6):
+    x = x.astype(jnp.float32)
+    norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
+    return x / jnp.maximum(norm, eps)
+
+
 def _contrastive_sim_matrix(z1, z2, temperature):
     N = z1.shape[0]
-    z1 = z1 / jnp.linalg.norm(z1, axis=-1, keepdims=True)
-    z2 = z2 / jnp.linalg.norm(z2, axis=-1, keepdims=True)
+    z1 = _l2_normalize_rows(z1)
+    z2 = _l2_normalize_rows(z2)
     z = jnp.concatenate([z1, z2], axis=0)
-    sim_matrix = jnp.dot(z, z.T) / temperature
+    t = jnp.asarray(temperature, dtype=jnp.float32)
+    sim_matrix = jnp.dot(z, z.T) / t
     labels = jnp.arange(2 * N)
     pos_indices = (labels + N) % (2 * N)
     pos_sim = sim_matrix[labels, pos_indices]
@@ -122,7 +129,7 @@ def contrastive_info_nce_loss(z1, z2, temperature=0.1):
     """SimCLR InfoNCE: -log(exp(S+) / sum_{j!=i} exp(S_ij)), positive in denominator."""
     import jax.scipy.special
 
-    sim_matrix, labels, _, pos_sim = _contrastive_sim_matrix(z1, z2, temperature)
+    sim_matrix, labels, pos_indices, pos_sim = _contrastive_sim_matrix(z1, z2, temperature)
     mask = jnp.ones(sim_matrix.shape)
     mask = mask.at[labels, labels].set(0.0)
     denom_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
@@ -146,12 +153,13 @@ def full_yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, z_fake_aug, tempe
     import jax.scipy.special
 
     N = z_real.shape[0]
-    z_r = z_real / jnp.linalg.norm(z_real, axis=-1, keepdims=True)
-    z_ra = z_real_aug / jnp.linalg.norm(z_real_aug, axis=-1, keepdims=True)
-    z_f = z_fake / jnp.linalg.norm(z_fake, axis=-1, keepdims=True)
-    z_fa = z_fake_aug / jnp.linalg.norm(z_fake_aug, axis=-1, keepdims=True)
+    z_r = _l2_normalize_rows(z_real)
+    z_ra = _l2_normalize_rows(z_real_aug)
+    z_f = _l2_normalize_rows(z_fake)
+    z_fa = _l2_normalize_rows(z_fake_aug)
     z = jnp.concatenate([z_r, z_ra, z_f, z_fa], axis=0)
-    sim_matrix = jnp.dot(z, z.T) / temperature
+    t = jnp.asarray(temperature, dtype=jnp.float32)
+    sim_matrix = jnp.dot(z, z.T) / t
     labels = jnp.arange(4 * N)
     pos_indices = jnp.concatenate(
         [
@@ -174,11 +182,12 @@ def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
     import jax.scipy.special
 
     N = z_real.shape[0]
-    z_r = z_real / jnp.linalg.norm(z_real, axis=-1, keepdims=True)
-    z_ra = z_real_aug / jnp.linalg.norm(z_real_aug, axis=-1, keepdims=True)
-    z_f = z_fake / jnp.linalg.norm(z_fake, axis=-1, keepdims=True)
+    z_r = _l2_normalize_rows(z_real)
+    z_ra = _l2_normalize_rows(z_real_aug)
+    z_f = _l2_normalize_rows(z_fake)
     z = jnp.concatenate([z_r, z_ra, z_f], axis=0)
-    sim_matrix = jnp.dot(z, z.T) / temperature
+    t = jnp.asarray(temperature, dtype=jnp.float32)
+    sim_matrix = jnp.dot(z, z.T) / t
     anchors_sim = sim_matrix[: 2 * N, :]
     labels = jnp.arange(2 * N)
     pos_indices = (labels + N) % (2 * N)
