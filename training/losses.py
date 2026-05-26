@@ -146,16 +146,17 @@ def contrastive_dcl_loss(z1, z2, temperature=0.1):
     return jnp.mean(-pos_sim + neg_logsumexp)
 
 
-def full_yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, z_fake_aug, temperature=0.1):
-    """DCL on 4N batch: Real<->Real_Aug and Fake<->Fake_Aug; all cross-manifold pairs are negatives."""
-    import jax.scipy.special
-
+def _four_view_yin_yang_sim(z_real, z_real_aug, z_fake, z_fake_aug, temperature):
     N = z_real.shape[0]
-    z_r = _l2_normalize_rows(z_real)
-    z_ra = _l2_normalize_rows(z_real_aug)
-    z_f = _l2_normalize_rows(z_fake)
-    z_fa = _l2_normalize_rows(z_fake_aug)
-    z = jnp.concatenate([z_r, z_ra, z_f, z_fa], axis=0)
+    z = jnp.concatenate(
+        [
+            _l2_normalize_rows(z_real),
+            _l2_normalize_rows(z_real_aug),
+            _l2_normalize_rows(z_fake),
+            _l2_normalize_rows(z_fake_aug),
+        ],
+        axis=0,
+    )
     t = jnp.asarray(temperature, dtype=jnp.float32)
     sim_matrix = jnp.dot(z, z.T) / t
     labels = jnp.arange(4 * N)
@@ -168,7 +169,34 @@ def full_yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, z_fake_aug, tempe
         ]
     )
     pos_sim = sim_matrix[labels, pos_indices]
-    mask = jnp.ones((4 * N, 4 * N))
+    return sim_matrix, labels, pos_indices, pos_sim, N
+
+
+def full_yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, z_fake_aug, temperature=0.1):
+    sim_matrix, labels, pos_indices, pos_sim, N = _four_view_yin_yang_sim(
+        z_real, z_real_aug, z_fake, z_fake_aug, temperature
+    )
+    import jax.scipy.special
+
+    mask = jnp.ones((4 * N, 4 * N), dtype=jnp.float32)
+    mask = mask.at[labels, labels].set(0.0)
+    mask = mask.at[labels, pos_indices].set(0.0)
+    neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
+    return jnp.mean(-pos_sim + neg_logsumexp)
+
+
+def asymmetric_yin_yang_contrastive_loss(
+    z_real, z_real_aug, z_fake, z_fake_aug, temperature=0.1, repulsion_beta=5.0
+):
+    sim_matrix, labels, pos_indices, pos_sim, N = _four_view_yin_yang_sim(
+        z_real, z_real_aug, z_fake, z_fake_aug, temperature
+    )
+    import jax.scipy.special
+
+    beta = jnp.asarray(repulsion_beta, dtype=jnp.float32)
+    mask = jnp.ones((4 * N, 4 * N), dtype=jnp.float32)
+    mask = mask.at[N : 2 * N, 2 * N : 4 * N].set(beta)
+    mask = mask.at[2 * N : 4 * N, N : 2 * N].set(beta)
     mask = mask.at[labels, labels].set(0.0)
     mask = mask.at[labels, pos_indices].set(0.0)
     neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
@@ -198,8 +226,20 @@ def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
 
 
 def contrastive_loss(
-    z1, z2, loss_type="full_yin_yang", temperature=0.1, z_fake=None, z_fake_aug=None
+    z1,
+    z2,
+    loss_type="asymmetric_yin_yang",
+    temperature=0.1,
+    z_fake=None,
+    z_fake_aug=None,
+    repulsion_beta=5.0,
 ):
+    if loss_type == "asymmetric_yin_yang":
+        if z_fake is None or z_fake_aug is None:
+            raise ValueError("asymmetric_yin_yang contrastive loss requires z_fake and z_fake_aug")
+        return asymmetric_yin_yang_contrastive_loss(
+            z1, z2, z_fake, z_fake_aug, temperature, repulsion_beta=repulsion_beta
+        )
     if loss_type == "full_yin_yang":
         if z_fake is None or z_fake_aug is None:
             raise ValueError("full_yin_yang contrastive loss requires z_fake and z_fake_aug")

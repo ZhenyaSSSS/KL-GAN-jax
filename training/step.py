@@ -116,7 +116,7 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
             proj_fake = d_state.apply_fn({"params": d_params}, fake_images)
 
             proj_fake_aug = None
-            if config.contrastive_loss_type == "full_yin_yang":
+            if config.contrastive_loss_type in ("full_yin_yang", "asymmetric_yin_yang"):
                 fake_images_aug = apply_simple_augmentation(fake_images, rng_aug_fake)
                 proj_fake_aug = d_state.apply_fn({"params": d_params}, fake_images_aug)
 
@@ -134,6 +134,7 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
                 temperature=config.contrastive_temperature,
                 z_fake=proj_fake,
                 z_fake_aug=proj_fake_aug,
+                repulsion_beta=config.contrastive_repulsion_beta,
             )
 
             if config.lambda_decorr != 0.0:
