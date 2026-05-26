@@ -106,10 +106,8 @@ def sinkhorn_divergence(X, Y, epsilon=0.05, max_iter=15):
     
     return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
-def _l2_normalize_rows(x, eps=1e-6):
-    x = x.astype(jnp.float32)
-    norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
-    return x / jnp.maximum(norm, eps)
+def _l2_normalize_rows(x, eps=1e-8):
+    return safe_normalize(x.astype(jnp.float32), eps=eps)
 
 
 def _contrastive_sim_matrix(z1, z2, temperature):
