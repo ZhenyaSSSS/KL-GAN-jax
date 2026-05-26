@@ -141,6 +141,34 @@ def contrastive_dcl_loss(z1, z2, temperature=0.1):
     return jnp.mean(-pos_sim + neg_logsumexp)
 
 
+def full_yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, z_fake_aug, temperature=0.1):
+    """DCL on 4N batch: Real<->Real_Aug and Fake<->Fake_Aug; all cross-manifold pairs are negatives."""
+    import jax.scipy.special
+
+    N = z_real.shape[0]
+    z_r = z_real / jnp.linalg.norm(z_real, axis=-1, keepdims=True)
+    z_ra = z_real_aug / jnp.linalg.norm(z_real_aug, axis=-1, keepdims=True)
+    z_f = z_fake / jnp.linalg.norm(z_fake, axis=-1, keepdims=True)
+    z_fa = z_fake_aug / jnp.linalg.norm(z_fake_aug, axis=-1, keepdims=True)
+    z = jnp.concatenate([z_r, z_ra, z_f, z_fa], axis=0)
+    sim_matrix = jnp.dot(z, z.T) / temperature
+    labels = jnp.arange(4 * N)
+    pos_indices = jnp.concatenate(
+        [
+            jnp.arange(N, 2 * N),
+            jnp.arange(0, N),
+            jnp.arange(3 * N, 4 * N),
+            jnp.arange(2 * N, 3 * N),
+        ]
+    )
+    pos_sim = sim_matrix[labels, pos_indices]
+    mask = jnp.ones((4 * N, 4 * N))
+    mask = mask.at[labels, labels].set(0.0)
+    mask = mask.at[labels, pos_indices].set(0.0)
+    neg_logsumexp = jax.scipy.special.logsumexp(sim_matrix, axis=1, b=mask)
+    return jnp.mean(-pos_sim + neg_logsumexp)
+
+
 def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
     """DCL on real/aug anchors; fake projections act as extra negatives (no extra forward)."""
     import jax.scipy.special
@@ -162,7 +190,13 @@ def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
     return jnp.mean(-pos_sim + neg_logsumexp)
 
 
-def contrastive_loss(z1, z2, loss_type="yin_yang", temperature=0.1, z_fake=None):
+def contrastive_loss(
+    z1, z2, loss_type="full_yin_yang", temperature=0.1, z_fake=None, z_fake_aug=None
+):
+    if loss_type == "full_yin_yang":
+        if z_fake is None or z_fake_aug is None:
+            raise ValueError("full_yin_yang contrastive loss requires z_fake and z_fake_aug")
+        return full_yin_yang_contrastive_loss(z1, z2, z_fake, z_fake_aug, temperature)
     if loss_type == "yin_yang":
         if z_fake is None:
             raise ValueError("yin_yang contrastive loss requires z_fake")

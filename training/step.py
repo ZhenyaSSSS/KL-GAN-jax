@@ -95,21 +95,28 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
 
     if config.loss_type == "manifold":
         def d_loss_fn(d_params):
+            rng_aug_real, rng_aug_fake = jax.random.split(aug_rng)
+            proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
+
             if config.contrastive_pairing == "aug_aug":
-                rng_aug1, rng_aug2 = jax.random.split(aug_rng)
+                rng_aug1, rng_aug2 = jax.random.split(rng_aug_real)
                 real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
                 real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
                 proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
                 proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
+                z_real, z_real_aug = proj_real_aug1, proj_real_aug2
             else:
-                rng_aug1, _ = jax.random.split(aug_rng)
-                real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
-                proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
-
-            proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
+                real_images_aug = apply_simple_augmentation(real_images, rng_aug_real)
+                proj_real_aug = d_state.apply_fn({"params": d_params}, real_images_aug)
+                z_real, z_real_aug = proj_real_clean, proj_real_aug
 
             fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
             proj_fake = d_state.apply_fn({"params": d_params}, fake_images)
+
+            proj_fake_aug = None
+            if config.contrastive_loss_type == "full_yin_yang":
+                fake_images_aug = apply_simple_augmentation(fake_images, rng_aug_fake)
+                proj_fake_aug = d_state.apply_fn({"params": d_params}, fake_images_aug)
 
             loss_sinkhorn = -sinkhorn_divergence(
                 proj_real_clean,
@@ -118,16 +125,13 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
                 max_iter=config.sinkhorn_max_iter,
             )
 
-            if config.contrastive_pairing == "aug_aug":
-                z1, z2 = proj_real_aug1, proj_real_aug2
-            else:
-                z1, z2 = proj_real_clean, proj_real_aug1
             loss_contrastive = contrastive_loss(
-                z1,
-                z2,
+                z_real,
+                z_real_aug,
                 loss_type=config.contrastive_loss_type,
                 temperature=config.contrastive_temperature,
                 z_fake=proj_fake,
+                z_fake_aug=proj_fake_aug,
             )
 
             if config.lambda_decorr != 0.0:
