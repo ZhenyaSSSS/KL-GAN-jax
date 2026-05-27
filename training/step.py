@@ -8,10 +8,19 @@ from training.losses import (
     zero_centered_repulsion_loss,
     sinkhorn_divergence,
     contrastive_loss,
+    discriminator_hinge_loss_d,
+    generator_hinge_loss_g,
     tpu_feature_decorrelation_loss,
     coverage_loss,
 )
 from config import config
+
+
+def _disc_apply(apply_fn, params, images):
+    out = apply_fn({"params": params}, images)
+    if config.loss_type == "manifold" and config.use_hinge_head:
+        return out[0], out[1]
+    return out, None
 
 def augment_single(img, rng):
     """Probabilistic spatial augmentations for VAE latents (contrastive branch only)."""
@@ -98,27 +107,27 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
     if config.loss_type == "manifold":
         def d_loss_fn(d_params):
             rng_aug_real, rng_aug_fake = jax.random.split(aug_rng)
-            proj_real_clean = d_state.apply_fn({"params": d_params}, real_images)
+            proj_real_clean, score_real = _disc_apply(d_state.apply_fn, d_params, real_images)
 
             if config.contrastive_pairing == "aug_aug":
                 rng_aug1, rng_aug2 = jax.random.split(rng_aug_real)
                 real_images_aug1 = apply_simple_augmentation(real_images, rng_aug1)
                 real_images_aug2 = apply_simple_augmentation(real_images, rng_aug2)
-                proj_real_aug1 = d_state.apply_fn({"params": d_params}, real_images_aug1)
-                proj_real_aug2 = d_state.apply_fn({"params": d_params}, real_images_aug2)
+                proj_real_aug1, _ = _disc_apply(d_state.apply_fn, d_params, real_images_aug1)
+                proj_real_aug2, _ = _disc_apply(d_state.apply_fn, d_params, real_images_aug2)
                 z_real, z_real_aug = proj_real_aug1, proj_real_aug2
             else:
                 real_images_aug = apply_simple_augmentation(real_images, rng_aug_real)
-                proj_real_aug = d_state.apply_fn({"params": d_params}, real_images_aug)
+                proj_real_aug, _ = _disc_apply(d_state.apply_fn, d_params, real_images_aug)
                 z_real, z_real_aug = proj_real_clean, proj_real_aug
 
             fake_images = g_state.apply_fn({"params": g_state.params}, z, rngs={"noise": noise_rng})
-            proj_fake = d_state.apply_fn({"params": d_params}, fake_images)
+            proj_fake, score_fake = _disc_apply(d_state.apply_fn, d_params, fake_images)
 
             proj_fake_aug = None
             if config.contrastive_loss_type in ("full_yin_yang", "asymmetric_yin_yang"):
                 fake_images_aug = apply_simple_augmentation(fake_images, rng_aug_fake)
-                proj_fake_aug = d_state.apply_fn({"params": d_params}, fake_images_aug)
+                proj_fake_aug, _ = _disc_apply(d_state.apply_fn, d_params, fake_images_aug)
 
             loss_sinkhorn = -sinkhorn_divergence(
                 proj_real_clean,
@@ -137,38 +146,74 @@ def train_step(rng, g_state, d_state, ema_g_params, real_images):
                 repulsion_beta=config.contrastive_repulsion_beta,
             )
 
+            if config.use_hinge_head:
+                loss_hinge_d = discriminator_hinge_loss_d(
+                    score_real, score_fake, margin=config.hinge_margin
+                )
+            else:
+                loss_hinge_d = jnp.asarray(0.0, dtype=loss_sinkhorn.dtype)
+
             if config.lambda_decorr != 0.0:
                 loss_decorr = tpu_feature_decorrelation_loss(proj_real_clean)
             else:
                 loss_decorr = jnp.asarray(0.0, dtype=loss_sinkhorn.dtype)
 
             loss_cov = coverage_loss(proj_real_clean)
-            
-            loss_D = (loss_sinkhorn + 
-                      config.lambda_contrastive * loss_contrastive + 
-                      config.lambda_decorr * loss_decorr + 
-                      config.lambda_cov * loss_cov)
-                      
-            return loss_D, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real_clean)
 
-        grads_d, (loss_sinkhorn, loss_contrastive, loss_decorr, loss_cov, proj_real_clean) = jax.grad(d_loss_fn, has_aux=True)(d_state.params)
+            loss_D = (
+                loss_sinkhorn
+                + config.lambda_contrastive * loss_contrastive
+                + config.lambda_hinge * loss_hinge_d
+                + config.lambda_decorr * loss_decorr
+                + config.lambda_cov * loss_cov
+            )
+
+            return loss_D, (
+                loss_sinkhorn,
+                loss_contrastive,
+                loss_hinge_d,
+                loss_decorr,
+                loss_cov,
+                proj_real_clean,
+            )
+
+        grads_d, (loss_sinkhorn, loss_contrastive, loss_hinge_d, loss_decorr, loss_cov, proj_real_clean) = (
+            jax.grad(d_loss_fn, has_aux=True)(d_state.params)
+        )
 
         def g_loss_fn(g_params):
             fake_images = g_state.apply_fn({"params": g_params}, z, rngs={"noise": noise_rng})
-            proj_fake = d_state.apply_fn({"params": d_state.params}, fake_images)
-            
-            loss_G = sinkhorn_divergence(proj_real_clean, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter)
-            return loss_G, loss_G
+            proj_fake, score_fake = _disc_apply(d_state.apply_fn, d_state.params, fake_images)
 
-        grads_g, loss_G = jax.grad(g_loss_fn, has_aux=True)(g_state.params)
-        
+            loss_g_sinkhorn = sinkhorn_divergence(
+                proj_real_clean, proj_fake, epsilon=config.sinkhorn_epsilon, max_iter=config.sinkhorn_max_iter
+            )
+            if config.use_hinge_head:
+                loss_g_hinge = generator_hinge_loss_g(score_fake)
+            else:
+                loss_g_hinge = jnp.asarray(0.0, dtype=loss_g_sinkhorn.dtype)
+            loss_G = loss_g_sinkhorn + config.lambda_hinge * loss_g_hinge
+            return loss_G, (loss_G, loss_g_sinkhorn, loss_g_hinge)
+
+        grads_g, (loss_G, loss_g_sinkhorn, loss_g_hinge) = jax.grad(g_loss_fn, has_aux=True)(g_state.params)
+
+        loss_d_total = (
+            loss_sinkhorn
+            + config.lambda_contrastive * loss_contrastive
+            + config.lambda_hinge * loss_hinge_d
+            + config.lambda_decorr * loss_decorr
+            + config.lambda_cov * loss_cov
+        )
         metrics = {
             "loss_G": loss_G,
-            "loss_D": loss_sinkhorn + config.lambda_contrastive * loss_contrastive + config.lambda_decorr * loss_decorr + config.lambda_cov * loss_cov,
+            "loss_D": loss_d_total,
             "Sinkhorn": -loss_sinkhorn,
             "Contrastive": loss_contrastive,
             "Coverage": loss_cov,
         }
+        if config.use_hinge_head:
+            metrics["Hinge_D"] = loss_hinge_d
+            metrics["Hinge_G"] = loss_g_hinge
         if config.lambda_decorr != 0.0:
             metrics["Decorr"] = loss_decorr
 

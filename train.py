@@ -145,6 +145,7 @@ def main():
     d_model = Discriminator(
         base_features=config.disc_base_features,
         use_mbd=config.use_minibatch_discrimination,
+        use_hinge_head=config.use_hinge_head,
         num_kernels_mbd=config.num_kernels_mbd,
         kernel_dim_mbd=config.kernel_dim_mbd,
         dtype=dt,
@@ -255,12 +256,14 @@ def main():
                     sinkhorn_val = float(jnp.mean(metrics.get("Sinkhorn", 0.0)))
                     contrastive_val = float(jnp.mean(metrics.get("Contrastive", 0.0)))
                     cov_val = float(jnp.mean(metrics.get("Coverage", 0.0)))
+                    hinge_d_val = float(jnp.mean(metrics.get("Hinge_D", 0.0))) if config.use_hinge_head else None
+                    hinge_g_val = float(jnp.mean(metrics.get("Hinge_G", 0.0))) if config.use_hinge_head else None
                     if config.lambda_decorr != 0.0:
                         decorr_val = float(jnp.mean(metrics["Decorr"]))
                         epoch_div += decorr_val
                     else:
                         decorr_val = None
-                    
+
                     epoch_skl += sinkhorn_val
                 else:
                     skl_val = float(jnp.mean(metrics.get("SKL", 0.0)))
@@ -298,6 +301,9 @@ def main():
                             "Step/Contrastive": contrastive_val,
                             "Step/Coverage": cov_val,
                         }
+                        if hinge_d_val is not None:
+                            m["Step/Hinge_D"] = hinge_d_val
+                            m["Step/Hinge_G"] = hinge_g_val
                         if decorr_val is not None:
                             m["Step/Decorr"] = decorr_val
                         log_dict.update(m)

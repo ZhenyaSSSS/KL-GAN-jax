@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 
 
@@ -223,6 +224,15 @@ def yin_yang_contrastive_loss(z_real, z_real_aug, z_fake, temperature=0.1):
     mask = mask.at[labels, pos_indices].set(0.0)
     neg_logsumexp = jax.scipy.special.logsumexp(anchors_sim, axis=1, b=mask)
     return jnp.mean(-pos_sim + neg_logsumexp)
+
+
+def discriminator_hinge_loss_d(score_real, score_fake, margin=0.2):
+    m = jnp.asarray(margin, dtype=jnp.float32)
+    return jnp.mean(jax.nn.relu(m - score_real)) + jnp.mean(jax.nn.relu(m + score_fake))
+
+
+def generator_hinge_loss_g(score_fake):
+    return -jnp.mean(score_fake)
 
 
 def contrastive_loss(

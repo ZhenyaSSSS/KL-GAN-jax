@@ -45,7 +45,8 @@ class DiscBlock(nn.Module):
         return shortcut + x_ffn * gamma
 
 class Discriminator(nn.Module):
-    use_mbd: bool = False
+    use_mbd: bool = True
+    use_hinge_head: bool = True
     num_kernels_mbd: int = 100
     kernel_dim_mbd: int = 5
     base_features: int = 128
@@ -93,19 +94,29 @@ class Discriminator(nn.Module):
         x = nn.LayerNorm(dtype=jnp.float32)(x).astype(self.dtype)
         x = nn.swish(x)
         
-        x = jnp.mean(x, axis=(1, 2))
+        f_base = jnp.mean(x, axis=(1, 2))
 
+        if self.loss_type == "manifold":
+            f_manifold = nn.Dense(self.manifold_proj_dim, dtype=self.dtype)(f_base)
+            f_manifold = nn.tanh(f_manifold)
+            if self.use_hinge_head:
+                x_hinge = f_base
+                if self.use_mbd:
+                    x_hinge = MinibatchDiscrimination(
+                        num_kernels=self.num_kernels_mbd,
+                        kernel_dim=self.kernel_dim_mbd,
+                        dtype=self.dtype,
+                    )(x_hinge)
+                score = nn.Dense(1, dtype=self.dtype)(x_hinge)
+                return f_manifold.astype(jnp.float32), jnp.squeeze(score, axis=-1).astype(jnp.float32)
+            return f_manifold.astype(jnp.float32)
+
+        x_kl = f_base
         if self.use_mbd:
-            x = MinibatchDiscrimination(
+            x_kl = MinibatchDiscrimination(
                 num_kernels=self.num_kernels_mbd,
                 kernel_dim=self.kernel_dim_mbd,
                 dtype=self.dtype,
-            )(x)
-
-        if self.loss_type == "manifold":
-            f = nn.Dense(self.manifold_proj_dim, dtype=self.dtype)(x)
-            f = nn.tanh(f)
-        else:
-            f = nn.Dense(256, dtype=self.dtype)(x)
-            
+            )(x_kl)
+        f = nn.Dense(256, dtype=self.dtype)(x_kl)
         return f.astype(jnp.float32)
