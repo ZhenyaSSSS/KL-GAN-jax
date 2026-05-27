@@ -14,10 +14,10 @@ loss_type: "manifold"
 manifold_proj_dim: 16
 # manifold only: real_aug | aug_aug
 contrastive_pairing: "real_aug"
-# asymmetric_yin_yang | full_yin_yang | yin_yang | infonce | dcl
+# asymmetric_yin_yang (beta=0: independent real/fake contrastive) | full_yin_yang | yin_yang | infonce | dcl
 contrastive_loss_type: "asymmetric_yin_yang"
 contrastive_temperature: 0.1
-contrastive_repulsion_beta: 5.0
+contrastive_repulsion_beta: 0.0
 lambda_contrastive: 1.0
 lambda_decorr: 0.0
 lambda_cov: 1.0

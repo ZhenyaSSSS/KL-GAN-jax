@@ -34,7 +34,7 @@ class Config:
     contrastive_pairing: str = "real_aug"
     contrastive_loss_type: str = "asymmetric_yin_yang"
     contrastive_temperature: float = 0.1
-    contrastive_repulsion_beta: float = 5.0
+    contrastive_repulsion_beta: float = 0.0
     lambda_contrastive: float = 4.0
     lambda_decorr: float = 0.0
     lambda_cov: float = 5.0
