@@ -23,7 +23,7 @@ class Config:
     epochs: int = 500
     lr_gen: float = 0.0002
     lr_disc: float = 0.0002
-    beta1: float = 0.5
+    beta1: float = 0.0
     beta2: float = 0.999
     latent_dim: int = 128
     lambda_div: float = 0.5
@@ -79,6 +79,12 @@ class Config:
     eval_every_epochs: int = 5
     fid_every_epochs: int = 50
     num_fid_samples: int = 10000
+
+    checkpoint_dir: str = "/kaggle/working/checkpoints"
+    checkpoint_file: str = "training_latest.pkl"
+    checkpoint_every_epochs: int = 3
+    resume_from: str = ""
+    resume_wandb: bool = True
 
     @property
     def compute_dtype(self):

@@ -21,5 +21,6 @@ tmp/
 .vscode/
 *.log
 
-# Local bundle dump (regenerate with bundle script)
+# Local bundle dump (regenerate locally; do not publish)
 kl_gan_tpu_full_code.txt
+bundle_full_code.ps1

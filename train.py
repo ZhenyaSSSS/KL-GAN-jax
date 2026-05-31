@@ -21,6 +21,12 @@ from models.generator import Generator
 from models.discriminator import Discriminator
 from training.step import train_step
 from training.losses import calc_stats_stable, kl_divergence_stable
+from training.checkpoint import (
+    load_training_checkpoint,
+    resolve_checkpoint_path,
+    restore_from_checkpoint,
+    save_training_checkpoint,
+)
 
 # Fixed latent batch size for @jax.jit gen_batch (avoids XLA recompile on shape changes).
 GEN_BATCH_SIZE = 256
@@ -89,7 +95,24 @@ def main():
         except Exception as e:
             print("Failed to load W&B key from Kaggle secrets:", e)
 
-    wandb.init(project=config.wandb_project, name=config.wandb_run_name)
+    devices = jax.local_devices()
+    resume_path = resolve_checkpoint_path(
+        config.checkpoint_dir, config.checkpoint_file, config.resume_from
+    )
+    resume_payload = None
+    if resume_path:
+        print(f"Loading checkpoint for resume: {resume_path}")
+        resume_payload = load_training_checkpoint(resume_path)
+
+    if resume_payload and config.resume_wandb and resume_payload.get("wandb_run_id"):
+        wandb.init(
+            project=config.wandb_project,
+            name=config.wandb_run_name,
+            id=resume_payload["wandb_run_id"],
+            resume="must",
+        )
+    else:
+        wandb.init(project=config.wandb_project, name=config.wandb_run_name)
     wandb.config.update(config.__dict__)
 
     rng = jax.random.PRNGKey(config.seed)
@@ -169,28 +192,40 @@ def main():
         weight_decay=1e-4,
     )
 
-    rng, init_g_rng, init_noise_rng = jax.random.split(rng, 3)
-    dummy_z = jnp.ones((1, config.latent_dim), dtype=jnp.float32)
-    g_params = g_model.init({'params': init_g_rng, 'noise': init_noise_rng}, dummy_z)["params"]
-    g_state = train_state.TrainState.create(apply_fn=g_model.apply, params=g_params, tx=tx_g)
-    g_state = flax.jax_utils.replicate(g_state)
-
-    rng, init_d_rng = jax.random.split(rng)
-    d_keys = jax.random.split(init_d_rng, num_devices)
-    dummy_img = jnp.ones((1, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
-
-    @jax.pmap
-    def init_d_state(key):
-        variables = d_model.init(key, dummy_img)
-        return train_state.TrainState.create(
-            apply_fn=d_model.apply, 
-            params=variables["params"], 
-            tx=tx_d
+    if resume_payload:
+        g_state, d_state, ema_g_params, rng, global_step, last_epoch = restore_from_checkpoint(
+            resume_payload,
+            g_apply_fn=g_model.apply,
+            d_apply_fn=d_model.apply,
+            tx_g=tx_g,
+            tx_d=tx_d,
+            devices=devices,
         )
+        start_epoch = last_epoch + 1
+        print(f"Resumed: global_step={global_step}, next_epoch={start_epoch}")
+    else:
+        rng, init_g_rng, init_noise_rng = jax.random.split(rng, 3)
+        dummy_z = jnp.ones((1, config.latent_dim), dtype=jnp.float32)
+        g_params = g_model.init({"params": init_g_rng, "noise": init_noise_rng}, dummy_z)["params"]
+        g_state = train_state.TrainState.create(apply_fn=g_model.apply, params=g_params, tx=tx_g)
+        g_state = flax.jax_utils.replicate(g_state)
+        rng, init_d_rng = jax.random.split(rng)
+        d_keys = jax.random.split(init_d_rng, num_devices)
+        dummy_img = jnp.ones((1, config.image_size, config.image_size, config.channels), dtype=jnp.float32)
 
-    d_state = init_d_state(d_keys)
+        @jax.pmap
+        def init_d_state(key):
+            variables = d_model.init(key, dummy_img)
+            return train_state.TrainState.create(
+                apply_fn=d_model.apply,
+                params=variables["params"],
+                tx=tx_d,
+            )
 
-    ema_g_params = g_state.params
+        d_state = init_d_state(d_keys)
+        ema_g_params = g_state.params
+        global_step = 0
+        start_epoch = 1
 
     rng, test_z_rng = jax.random.split(rng)
     test_z = jax.random.normal(test_z_rng, (GEN_BATCH_SIZE, config.latent_dim), dtype=jnp.float32)
@@ -223,9 +258,8 @@ def main():
 
     print("Starting compilation...")
     compile_start = time.time()
-    global_step = 0
 
-    for epoch in range(1, config.epochs + 1):
+    for epoch in range(start_epoch, config.epochs + 1):
         epoch_loss_g, epoch_loss_d, epoch_skl, epoch_div = 0.0, 0.0, 0.0, 0.0
 
         with tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}/{config.epochs}") as pbar:
@@ -392,22 +426,22 @@ def main():
             np.save(f"/kaggle/working/fid_samples/fake_latents_epoch_{epoch}.npy", fake_latents_fid)
             print(f"Saved 10k LATENTS to disk. Decode them later on a GPU!")
 
-            try:
-                from flax.training import checkpoints
-                checkpoints.save_checkpoint(
-                    ckpt_dir="/kaggle/working/checkpoints",
-                    target=ema_g_params_cpu,
-                    step=epoch,
-                    prefix="g_ema_",
-                    keep=3,
-                )
-                print(f"Saved checkpoint and FID samples to /kaggle/working/ for epoch {epoch}")
-            except ImportError:
-                import pickle
-                os.makedirs("/kaggle/working/checkpoints", exist_ok=True)
-                with open(f"/kaggle/working/checkpoints/g_ema_{epoch}.pkl", "wb") as f:
-                    pickle.dump(ema_g_params_cpu, f)
-                print(f"Saved weights (pickle) and FID samples to /kaggle/working/ for epoch {epoch}")
+        if epoch % config.checkpoint_every_epochs == 0 or epoch == config.epochs:
+            os.makedirs(config.checkpoint_dir, exist_ok=True)
+            latest_path = os.path.join(config.checkpoint_dir, config.checkpoint_file)
+            save_training_checkpoint(
+                latest_path,
+                g_state=g_state,
+                d_state=d_state,
+                ema_g_params=ema_g_params,
+                rng=rng,
+                global_step=global_step,
+                epoch=epoch,
+                wandb_run_id=wandb.run.id if wandb.run is not None else None,
+                config_dict=dict(config.__dict__),
+                num_devices=num_devices,
+            )
+            print(f"Overwrote {latest_path} (step={global_step}, epoch={epoch})")
 
         # Rotate shards across TPU cores over the interconnect so every D sees the whole dataset over 8 epochs
         dataset_sharded = rotate_shards(dataset_sharded)

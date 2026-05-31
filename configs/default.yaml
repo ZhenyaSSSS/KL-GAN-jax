@@ -7,7 +7,7 @@ batch_size_per_device: 256
 epochs: 500
 lr_gen: 0.0002
 lr_disc: 0.0002
-beta1: 0.5
+beta1: 0.0
 beta2: 0.999
 latent_dim: 128
 loss_type: "manifold"
@@ -44,10 +44,8 @@ gen_features: 384
 gen_depth: 16
 gen_mapping_dim: 1024
 
-# Dtype: float32 | bfloat16 (weights/activations for conv/linear; BN uses float32)
 network_dtype: bfloat16
 
-# JAX matmul/dot precision only (not "entire program float32"). Common: default | high | float32
 jax_matmul_precision: default
 
 # W&B
@@ -58,3 +56,10 @@ wandb_run_name: "default_run"
 eval_every_epochs: 5
 fid_every_epochs: 50
 num_fid_samples: 10000
+
+# Full training checkpoint (single .pkl: G/D opt, EMA, rng, step, wandb id)
+checkpoint_dir: "/kaggle/working/checkpoints"
+checkpoint_file: "training_latest.pkl"
+checkpoint_every_epochs: 3
+resume_from: ""
+resume_wandb: true
