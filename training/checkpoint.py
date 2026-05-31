@@ -15,9 +15,16 @@ def _to_numpy(pytree):
     return jax.tree_util.tree_map(lambda x: np.asarray(jax.device_get(x)), pytree)
 
 
+def _scalar_int(x) -> int:
+    arr = np.asarray(jax.device_get(x))
+    if arr.size == 0:
+        raise ValueError("empty array cannot be converted to int")
+    return int(arr.reshape(-1)[0])
+
+
 def _train_state_to_dict(ts: train_state.TrainState) -> dict:
     return {
-        "step": int(np.asarray(ts.step)),
+        "step": _scalar_int(ts.step),
         "params": _to_numpy(ts.params),
         "opt_state": _to_numpy(ts.opt_state),
     }

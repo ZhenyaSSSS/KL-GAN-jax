@@ -256,6 +256,26 @@ def main():
         out = gen_batch(params, z_pad, noise_rng)
         return np.asarray(out[:n_take])
 
+    def save_latest_checkpoint(epoch: int, step: int):
+        os.makedirs(config.checkpoint_dir, exist_ok=True)
+        latest_path = os.path.join(config.checkpoint_dir, config.checkpoint_file)
+        save_training_checkpoint(
+            latest_path,
+            g_state=g_state,
+            d_state=d_state,
+            ema_g_params=ema_g_params,
+            rng=rng,
+            global_step=step,
+            epoch=epoch,
+            wandb_run_id=wandb.run.id if wandb.run is not None else None,
+            config_dict=dict(config.__dict__),
+            num_devices=num_devices,
+        )
+        print(f"Overwrote {latest_path} (step={step}, epoch={epoch})")
+
+    if global_step == 0:
+        save_latest_checkpoint(epoch=0, step=0)
+
     print("Starting compilation...")
     compile_start = time.time()
 
@@ -427,21 +447,7 @@ def main():
             print(f"Saved 10k LATENTS to disk. Decode them later on a GPU!")
 
         if epoch % config.checkpoint_every_epochs == 0 or epoch == config.epochs:
-            os.makedirs(config.checkpoint_dir, exist_ok=True)
-            latest_path = os.path.join(config.checkpoint_dir, config.checkpoint_file)
-            save_training_checkpoint(
-                latest_path,
-                g_state=g_state,
-                d_state=d_state,
-                ema_g_params=ema_g_params,
-                rng=rng,
-                global_step=global_step,
-                epoch=epoch,
-                wandb_run_id=wandb.run.id if wandb.run is not None else None,
-                config_dict=dict(config.__dict__),
-                num_devices=num_devices,
-            )
-            print(f"Overwrote {latest_path} (step={global_step}, epoch={epoch})")
+            save_latest_checkpoint(epoch=epoch, step=global_step)
 
         # Rotate shards across TPU cores over the interconnect so every D sees the whole dataset over 8 epochs
         dataset_sharded = rotate_shards(dataset_sharded)
