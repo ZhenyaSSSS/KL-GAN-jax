@@ -113,7 +113,7 @@ def main():
         )
     else:
         wandb.init(project=config.wandb_project, name=config.wandb_run_name)
-    wandb.config.update(config.__dict__)
+    wandb.config.update(config.__dict__, allow_val_change=True)
 
     rng = jax.random.PRNGKey(config.seed)
 
