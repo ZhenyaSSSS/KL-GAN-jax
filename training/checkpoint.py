@@ -35,6 +35,7 @@ def _train_state_from_dict(
 ) -> train_state.TrainState:
     params = d["params"]
     opt_state = d["opt_state"]
+    step = jnp.asarray(d["step"])
     if devices is not None and devices:
 
         def _maybe_shard(x):
@@ -45,9 +46,10 @@ def _train_state_from_dict(
 
         params = jax.tree_util.tree_map(_maybe_shard, params)
         opt_state = jax.tree_util.tree_map(_maybe_shard, opt_state)
+        step = jax.device_put_sharded([step for _ in range(len(devices))], devices)
 
     ts = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
-    return ts.replace(step=jnp.asarray(d["step"]), opt_state=opt_state)
+    return ts.replace(step=step, opt_state=opt_state)
 
 
 def resolve_checkpoint_path(checkpoint_dir: str, checkpoint_file: str, resume_from: str) -> Optional[str]:
